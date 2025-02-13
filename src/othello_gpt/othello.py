@@ -1,5 +1,5 @@
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 players = [1, -1]
 opponent = {1: -1, -1: 1}
@@ -35,7 +35,12 @@ class OthelloState:  # TODO immutable dataclass?
             self.history = -np.ones(max_moves, dtype=int)
 
             self.turn = players[0]
-        elif size is None and board is not None and history is not None and turn is not None:
+        elif (
+            size is None
+            and board is not None
+            and history is not None
+            and turn is not None
+        ):
             self.size = board.shape[0]
             self.board = board
             self.history = history
@@ -55,7 +60,7 @@ class OthelloState:  # TODO immutable dataclass?
         return f"Turn = {self.turn}\n{histories_str}\n{self.board}"
 
 
-def get_flips(state: OthelloState, move: int) -> List[int]:
+def get_flips(state: OthelloState, move: int) -> List[Tuple[int, int]]:
     turn = state.turn
     size = state.size
     flips = []
@@ -76,7 +81,7 @@ def get_flips(state: OthelloState, move: int) -> List[int]:
         y += dy
         x += dx
         while 0 <= y < size and 0 <= x < size and state.board[y, x] == opponent[turn]:
-            flip.append(y * size + x)
+            flip.append((y, x))
             y += dy
             x += dx
         if 0 <= y < size and 0 <= x < size and state.board[y, x] == turn:
@@ -84,7 +89,9 @@ def get_flips(state: OthelloState, move: int) -> List[int]:
     return flips
 
 
-def make_move(state: OthelloState, move: int, validate: bool = True) -> OthelloState:
+def make_move(
+    state: OthelloState, move: int, validate: bool = True
+) -> Tuple[OthelloState, List[Tuple[int, int]]]:
     board = state.board.copy()
 
     history = state.history.copy()
@@ -102,10 +109,10 @@ def make_move(state: OthelloState, move: int, validate: bool = True) -> OthelloS
         raise ValueError(f"Invalid move: {move}")
 
     board[move // state.size, move % state.size] = state.turn
-    for flip in flips:
-        board[flip // state.size, flip % state.size] = state.turn
+    for y, x in flips:
+        board[y, x] = state.turn
 
-    return OthelloState(board=board, history=history, turn=turn)
+    return OthelloState(board=board, history=history, turn=turn), flips
 
 
 def get_legal_move_ids(state: OthelloState, no_pass: bool = True) -> List[int]:

@@ -35,6 +35,9 @@ def get_id_to_token_id_map(size: int, pad_token: int | None = None):
 
 
 def tokenize(history, size, pad_token=PAD_TOKEN):
+    if isinstance(history[0], list):
+        # TODO vectorise/parallelise
+        return {"input_ids": [tokenize(h, size, pad_token)["input_ids"] for h in history]}
     id_to_token_id_map = get_id_to_token_id_map(size, pad_token)
     return {"input_ids": [id_to_token_id_map[i] for i in history]}
 
