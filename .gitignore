@@ -1,6 +1,7 @@
 /src/othello_gpt/model/wandb/
 /data/probes/*.pt
-!/data/probes/linear_probe_20250208_092403.pt
+!/data/probes/linear_probe_20250212_141120_mid_tem.pt
+!/data/probes/linear_probe_20250213_000355_mid_flips.pt
 .DS_Store
 scratch.ipynb
 *secret*

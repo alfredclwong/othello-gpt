@@ -27,7 +27,7 @@ def plot_game(
     hovertext=None,
     shift_legalities=True,
     title="",
-    subplot_titles=[],
+    subplot_titles=None,
 ):
     game_boards = np.array(game["boards"])
     n_moves, size, _ = game_boards.shape
@@ -55,7 +55,7 @@ def plot_game(
 
     n_rows = (n_moves - 1) // n_cols + 1
 
-    if not subplot_titles:
+    if subplot_titles is None:
         subplot_titles = [
             f"{i + 1}. {move_id_to_text(int(move_id), size)}"
             for i, move_id in enumerate(game_moves)
@@ -75,7 +75,7 @@ def plot_game(
         col = i % n_cols + 1
 
         # Create str 2d array for legal moves where 0 -> "" and 1 -> "X"
-        if i + 1 < n_moves:
+        if i + int(shift_legalities) < n_moves:
             text = np.where(game_legalities[i + int(shift_legalities)], "X", "")
         else:
             text = np.full_like(game_legalities[0], "", dtype=str)
