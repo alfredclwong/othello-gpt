@@ -323,3 +323,31 @@ vis = visualize_attention_patterns(
 HTML(vis)
 
 # %%
+w_o = model.W_O
+w_v = model.W_V
+w_ov = einops.einsum(
+    w_o, w_v,
+    "n_layer n_head d_head d_model_0, n_layer n_head d_model_1 d_head -> n_layer n_head d_model_0 d_model_1"
+)
+eigenvalues, _ = t.linalg.eig(w_ov.flatten(0, 1).detach().cpu())
+eigenvalues /= eigenvalues.abs()
+
+
+import plotly.express as px
+
+# Prepare data for scatter plot
+i = 3
+eigenvalues_real = eigenvalues[i].real.numpy()
+eigenvalues_imag = eigenvalues[i].imag.numpy()
+
+# Create scatter plot using Plotly
+fig = px.scatter(
+    x=eigenvalues_real,
+    y=eigenvalues_imag,
+    labels={"x": "Real part", "y": "Imaginary part"},
+    title="Scatter plot of eigenvalues"
+)
+fig.update_layout(xaxis_title="Real part", yaxis_title="Imaginary part")
+fig.show()
+
+# %%
