@@ -1,8 +1,10 @@
+import torch as t
 import multiprocessing as mp
 import tempfile
 from pathlib import Path
 from typing import Dict, List
 
+import einops
 import huggingface_hub as hf
 import numpy as np
 from datasets import Dataset, concatenate_datasets
@@ -90,6 +92,24 @@ def generate_dataset(
     return final_dataset
 
 
+def original_colour_target(batch, size):
+    coords = t.tensor(batch["coords"])
+    n_batch = coords.shape[0]
+    original_colour_boards = t.zeros((n_batch, size, size), dtype=int)
+    for i in range(n_batch):
+        original_colour_boards[i, coords[i, ::2, 0], coords[i, ::2, 1]] = 1
+        original_colour_boards[i, coords[i, 1::2, 0], coords[i, 1::2, 1]] = -1
+
+    boards = t.tensor(batch["boards"])
+    empty = boards == 0
+    original_colour_boards = einops.repeat(original_colour_boards, "n_batch row col -> n_batch pos row col", pos=boards.shape[1])
+    original_colour_boards = t.where(empty, 0, original_colour_boards)
+    original_colour_boards[:, [2, 3], [2, 3]] = 1
+    original_colour_boards[:, [2, 3], [3, 2]] = -1
+    original_colour_boards[:, 1::2] *= -1
+    return original_colour_boards
+
+
 if __name__ == "__main__":
     from pathlib import Path
 
@@ -102,6 +122,14 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp_dir:
         dataset = generate_dataset(Path(tmp_dir), n_games, size)
         dataset_dict = dataset.train_test_split(test_size=0.1)
+        dataset_dict["test"] = dataset_dict["test"].map(
+            lambda x: original_colour_target(x, size),
+            batched=True,
+        )
+        dataset_dict["train"] = dataset_dict["train"].map(
+            lambda x: original_colour_target(x, size),
+            batched=True,
+        )
         dataset_dict["test"] = dataset_dict["test"].map(
             lambda x: tokenize(x["moves"], size),
             batched=True,

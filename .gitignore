@@ -2,6 +2,7 @@
 /data/probes/*.pt
 !/data/probes/linear_probe_20250212_141120_mid_tem.pt
 !/data/probes/linear_probe_20250213_000355_mid_flips.pt
+!/data/probes/linear_probe_20250213_221416_mid_otem.pt
 .DS_Store
 scratch.ipynb
 *secret*

@@ -82,7 +82,6 @@ model = HookedTransformer(hooked_cfg)
 model.load_and_process_state_dict(state_dict)
 model.to(device)
 
-
 # %%
 def theirs_empty_mine_target(batch):
     boards = t.tensor(batch["boards"], device=device)[:, :-1]
@@ -176,8 +175,21 @@ def captures_target(batch):
 
 
 def original_colour_target(batch):
-    # Hypothesis: moves -> H0 -> (original colour, flips) -> M0 -> (originally mine & not flipped = mine, originally mine & flipped = theirs, empty = empty, etc.) -> H1 -> (?) -> M1 -> (legal)
-    pass
+    # # Hypothesis: moves -> H0 -> (original colour, flips) -> M0 -> (originally mine & not flipped = mine, originally mine & flipped = theirs, empty = empty, etc.) -> H1 -> (?) -> M1 -> (legal)
+    # coords = t.tensor(batch["coords"])
+    # n_batch = coords.shape[0]
+    # original_colour_boards = t.zeros((n_batch, size, size), dtype=int)
+    # for i in range(n_batch):
+    #     original_colour_boards[i, coords[i, ::2, 0], coords[i, ::2, 1]] = 1
+    #     original_colour_boards[i, coords[i, 1::2, 0], coords[i, 1::2, 1]] = -1
+
+    # boards = t.tensor(batch["boards"])
+    # empty = boards == 0
+    # original_colour_boards = einops.repeat(original_colour_boards, "n_batch row col -> n_batch pos row col", pos=boards.shape[1])
+    # original_colour_boards = t.where(empty, 0, original_colour_boards)
+    # original_colour_boards[:, 1::2] *= -1
+    # return original_colour_boards.to(device)
+    return t.tensor(batch["originals"], device=device)[:, :-1].int() + 1
 
 
 def forward_probe(
@@ -215,7 +227,7 @@ def forward_probe(
     return log_probs, loss
 
 
-target_fn = captures_target
+target_fn = original_colour_target
 
 # %%
 ## TRAIN LINEAR PROBES
@@ -229,8 +241,8 @@ target_fn = captures_target
 
 @dataclass
 class LinearProbeTrainingArgs:
-    n_epochs: int = 16
-    lr: float = 5e-4
+    n_epochs: int = 12
+    lr: float = 1e-3
     batch_size: int = 1024
     n_steps_per_epoch: int = 200
     n_test: int = 1000
@@ -268,6 +280,7 @@ def train_linear_probe(
     ) / np.sqrt(model.cfg.d_model)
     linear_probe = linear_probe.to(device)
     linear_probe.requires_grad = True
+    print(f"{linear_probe.shape=}")
 
     test_loss, test_accs = test_linear_probe(
         test_dataset, test_y, linear_probe, target_fn
@@ -279,7 +292,7 @@ def train_linear_probe(
         (args.n_epochs, args.n_steps_per_epoch, args.batch_size),
     )
 
-    cols = ["input_ids", "boards", "coords", "legalities", "flips"]
+    cols = ["input_ids", "boards", "coords", "legalities", "flips", "originals"]
     train_dataset = dataset_dict["train"].select_columns(cols)
 
     optimizer = t.optim.AdamW(
@@ -328,17 +341,21 @@ def train_linear_probe(
     return linear_probe
 
 
-# args = LinearProbeTrainingArgs()
-# # args = LinearProbeTrainingArgs(
-# #     use_wandb=False, n_epochs=2, n_steps_per_epoch=10, lr=1e-3
-# # )
-# linear_probe = train_linear_probe(model, args, target_fn)
+args = LinearProbeTrainingArgs()
+# args = LinearProbeTrainingArgs(
+#     use_wandb=False, n_epochs=2, n_steps_per_epoch=10, lr=1e-3
+# )
+linear_probe = train_linear_probe(model, args, target_fn)
 
 # %%
 # t.save(
 #     linear_probe,
-#     probe_dir / f"linear_probe_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.pt",
+#     probe_dir / f"linear_probe_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_mid_otem.pt",
 # )
+linear_probe_otem = t.load(
+    probe_dir / "linear_probe_20250213_221416_mid_otem.pt",
+    weights_only=True,
+).detach()
 linear_probe_tem = t.load(
     probe_dir / "linear_probe_20250212_141120_mid_tem.pt",
     weights_only=True,
@@ -347,36 +364,51 @@ linear_probe_flips = t.load(
     probe_dir / "linear_probe_20250213_000355_mid_flips.pt",
     weights_only=True,
 ).detach()
-linear_probe_tem.shape, linear_probe_flips.shape  # d_model row col d_probe n_layer
+linear_probe_otem.shape, linear_probe_tem.shape, linear_probe_flips.shape  # d_model row col d_probe n_layer
 
 # %%
 # Visualise cross-orthogonality between linear probes, across layers and features
 # Visualise additivity between exhaustive probe spaces (e.g. theirs + empty + mine = 1, flipped + not flipped = 1)
-theirs = linear_probe_tem[:, :, :, 0].flatten(1, -2)
-empty = linear_probe_tem[:, :, :, 1].flatten(1, -2)
-mine = linear_probe_tem[:, :, :, 2].flatten(1, -2)
-flipped = linear_probe_flips[:, :, :, 0].flatten(1, -2)
-not_flipped = linear_probe_flips[:, :, :, 1].flatten(1, -2)
+otheirs = linear_probe_otem[:, :, :, 0].flatten(1, -2)#[:, all_squares]
+oempty = linear_probe_otem[:, :, :, 1].flatten(1, -2)#[:, all_squares]
+omine = linear_probe_otem[:, :, :, 2].flatten(1, -2)#[:, all_squares]
+theirs = linear_probe_tem[:, :, :, 0].flatten(1, -2)#[:, all_squares]
+empty = linear_probe_tem[:, :, :, 1].flatten(1, -2)#[:, all_squares]
+mine = linear_probe_tem[:, :, :, 2].flatten(1, -2)#[:, all_squares]
+flipped = linear_probe_flips[:, :, :, 0].flatten(1, -2)#[:, all_squares]
+not_flipped = linear_probe_flips[:, :, :, 1].flatten(1, -2)#[:, all_squares]
 r0 = t.randn_like(theirs)
 r1 = t.randn_like(r0)
 names = [
+    "otheirs",
+    # "oempty",
+    "omine",
+    "otheirs+omine",
     "theirs",
     "empty",
     "mine",
     "theirs+mine",
     "flipped",
-    "not_flipped",
+    # "not_flipped",
+    "omine+flipped",
+    # "omine+not_flipped",
     # "r0",
     # "r1",
 ]
 layers = [f"L{i}" for i in range(linear_probe_tem.shape[-1])]
 probes = t.stack([
+    otheirs,
+    # oempty,
+    omine,
+    otheirs + omine,
     theirs,
     empty,
     mine,
     theirs + mine,
     flipped,
-    not_flipped,
+    # not_flipped,
+    omine + flipped,
+    # omine + not_flipped,
     # r0,
     # r1,
 ])
@@ -405,11 +437,13 @@ fig.update_layout(
         tickvals=list(range(len(index))),
         ticktext=dots_df.columns,
         tickangle=30,
+        tickfont=dict(size=8),
     ),
     yaxis=dict(
         tickmode='array',
         tickvals=list(range(len(index))),
         ticktext=dots_df.index,
+        tickfont=dict(size=8),
     ),
     shapes=[
         dict(
@@ -437,7 +471,7 @@ fig.update_layout(
 fig.show()
 
 # %%
-n_focus = 2000
+n_focus = 100
 focus_games = dataset_dict["test"].take(n_focus)
 focus_input_ids = t.tensor(focus_games["input_ids"], device=device)
 # focus_logprobs = model(focus_input_ids[:, :-1])
@@ -449,28 +483,33 @@ focus_logit_boards.flatten(2)[..., all_squares] = focus_logits[..., 1:].detach()
 focus_probs = focus_logits.softmax(-1)
 focus_prob_boards = t.full((n_focus, focus_logits.shape[1], size, size), 0.0)
 focus_prob_boards.flatten(2)[..., all_squares] = focus_probs[..., 1:].detach().cpu()
+focus_otem_boards = original_colour_target(focus_games).cpu()
 focus_tem_boards = theirs_empty_mine_target(focus_games).cpu()
 focus_flip_boards = captures_target(focus_games).cpu()
 
 # X, labels = focus_cache.accumulated_resid(incl_mid=True, return_labels=True)
 # y = target_fn(focus_games)
 with t.no_grad():
-    tem_pred_logprob, labels = forward_probe(
+    otem_pred_logprob, labels = forward_probe(
+        linear_probe_otem,
+        focus_games,
+        original_colour_target,
+        return_loss=False,
+        return_labels=True,
+    )
+    tem_pred_logprob, _ = forward_probe(
         linear_probe_tem,
         focus_games,
         theirs_empty_mine_target,
         return_loss=False,
-        return_labels=True,
     )
     flips_pred_logprob, _ = forward_probe(
         linear_probe_flips, focus_games, captures_target, return_loss=False
     )
-    # tem_pred_prob = t.softmax(t.exp(tem_pred_logprob), -1).to("cpu")
+    otem_pred_prob = t.exp(otem_pred_logprob).to("cpu")
     tem_pred_prob = t.exp(tem_pred_logprob).to("cpu")
-    # tem_pred_prob = tem_pred_logprob.to("cpu")
-    # flips_pred_prob = t.softmax(t.exp(flips_pred_logprob), -1).to("cpu")
     flips_pred_prob = t.exp(flips_pred_logprob).to("cpu")
-    # flips_pred_prob = flips_pred_logprob.to("cpu")
+    otem_pred_prob, otem_pred_index = otem_pred_prob.max(dim=-1)
     tem_pred_prob, tem_pred_index = tem_pred_prob.max(dim=-1)
     flips_pred_prob, flips_pred_index = flips_pred_prob.max(dim=-1)
 
@@ -487,6 +526,11 @@ test_pred_model = {
 }
 
 for layer, name in enumerate(labels):
+    otem_dict = {
+        "boards": otem_pred_index[layer, test_index],
+        "legalities": focus_otem_boards[test_index] == 1,
+        "moves": test_moves,
+    }
     tem_dict = {
         "boards": tem_pred_index[layer, test_index],
         "legalities": focus_tem_boards[test_index] == 1,
@@ -514,11 +558,20 @@ for layer, name in enumerate(labels):
         subplot_size=subplot_size,
     )
     plot_game(
+        otem_dict,
+        reversed=False,
+        textcolor="red",
+        hovertext=otem_pred_prob[layer, test_index],
+        shift_legalities=False,
+        title=f"Layer {name} linear probe prediction for original colours",
+        n_cols=n_cols,
+        subplot_size=subplot_size,
+    )
+    plot_game(
         tem_dict,
         reversed=False,
         textcolor="red",
         hovertext=tem_pred_prob[layer, test_index],
-        # hovertext=tem_dict["boards"],
         shift_legalities=False,
         title=f"Layer {name} linear probe prediction for board state",
         n_cols=n_cols,
@@ -529,7 +582,6 @@ for layer, name in enumerate(labels):
         reversed=False,
         textcolor="red",
         hovertext=flips_pred_prob[layer, test_index],
-        # hovertext=flips_dict["boards"],
         shift_legalities=False,
         title=f"Layer {name} linear probe prediction for flipped tiles",
         n_cols=n_cols,
