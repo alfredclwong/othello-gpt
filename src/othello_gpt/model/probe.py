@@ -99,23 +99,8 @@ def flip_parity_target(batch):
     # At each game position, a non-empty tile is either the same colour as when it was first played (0)
     # or it has been flipped to the other colour (1). I think that this is a necessary state for the
     # model to track in order to have an accurate board state representation.
-    coords = t.tensor(batch["coords"], device=device)
-    boards = t.tensor(batch["boards"], device=device)[:, :-1]
-
-    original_colour_boards = t.zeros((boards.shape[0], size, size))
-    original_colour_boards[:, [2, 3], [2, 3]] = 1
-    original_colour_boards[:, [2, 3], [3, 2]] = -1
-    for i, (ys, xs) in list(enumerate(zip(coords[:, :, 0], coords[:, :, 1]))):
-        original_colour_boards[i, ys[::2], xs[::2]] = 1
-        original_colour_boards[i, ys[1::2], xs[1::2]] = -1
-    original_colour_boards = einops.repeat(
-        original_colour_boards,
-        "n_batch row col -> n_batch pos row col",
-        pos=boards.shape[1],
-    )
-
-    flip_parity_boards = (boards != original_colour_boards) & (boards != 0)
-    return flip_parity_boards.int()
+    flips = t.tensor(batch["flips"], device=device)[:, :-1].int()
+    return flips.cumsum(dim=1) % 2
 
 
 def mine_flip_target(batch):
@@ -151,44 +136,11 @@ def captures_target(batch):
     # Hypothesis: each token tracks the tiles that it captured when the move was played
     # After H0, we have [my moves; their moves; my moves flipped; their moves flipped]
     # This gives us the
-    # n_batch = len(batch)
-
-    # boards = t.tensor(batch["boards"], device=device)
-    # initial_board = t.zeros((size, size), device=device)
-    # initial_board[[2, 3], [2, 3]] = 1
-    # initial_board[[2, 3], [3, 2]] = -1
-    # boards = t.cat(
-    #     [initial_board.unsqueeze(0).unsqueeze(0).repeat(n_batch, 1, 1, 1), boards],
-    #     dim=1,
-    # )
-
-    # captures = boards[:, :-1] != boards[:, 1:]
-    # coords = t.tensor(batch["coords"], device=device)
-
-    # for i in range(n_batch):
-    #     for j in range(captures.shape[1]):
-    #         y, x = coords[i, j]
-    #         captures[i, j, y, x] = False
-
-    # return captures[:, :-1].int()  # TODO 1: or :-1?
     return t.tensor(batch["flips"], device=device)[:, :-1].int()
 
 
 def original_colour_target(batch):
     # # Hypothesis: moves -> H0 -> (original colour, flips) -> M0 -> (originally mine & not flipped = mine, originally mine & flipped = theirs, empty = empty, etc.) -> H1 -> (?) -> M1 -> (legal)
-    # coords = t.tensor(batch["coords"])
-    # n_batch = coords.shape[0]
-    # original_colour_boards = t.zeros((n_batch, size, size), dtype=int)
-    # for i in range(n_batch):
-    #     original_colour_boards[i, coords[i, ::2, 0], coords[i, ::2, 1]] = 1
-    #     original_colour_boards[i, coords[i, 1::2, 0], coords[i, 1::2, 1]] = -1
-
-    # boards = t.tensor(batch["boards"])
-    # empty = boards == 0
-    # original_colour_boards = einops.repeat(original_colour_boards, "n_batch row col -> n_batch pos row col", pos=boards.shape[1])
-    # original_colour_boards = t.where(empty, 0, original_colour_boards)
-    # original_colour_boards[:, 1::2] *= -1
-    # return original_colour_boards.to(device)
     return t.tensor(batch["originals"], device=device)[:, :-1].int() + 1
 
 
@@ -345,7 +297,7 @@ args = LinearProbeTrainingArgs()
 # args = LinearProbeTrainingArgs(
 #     use_wandb=False, n_epochs=2, n_steps_per_epoch=10, lr=1e-3
 # )
-linear_probe = train_linear_probe(model, args, target_fn)
+# linear_probe = train_linear_probe(model, args, target_fn)
 
 # %%
 # t.save(
@@ -355,30 +307,37 @@ linear_probe = train_linear_probe(model, args, target_fn)
 linear_probe_otem = t.load(
     probe_dir / "linear_probe_20250213_221416_mid_otem.pt",
     weights_only=True,
+    map_location=device,
 ).detach()
 linear_probe_tem = t.load(
     probe_dir / "linear_probe_20250212_141120_mid_tem.pt",
     weights_only=True,
+    map_location=device,
 ).detach()
 linear_probe_flips = t.load(
     probe_dir / "linear_probe_20250213_000355_mid_flips.pt",
     weights_only=True,
+    map_location=device,
 ).detach()
 linear_probe_otem.shape, linear_probe_tem.shape, linear_probe_flips.shape  # d_model row col d_probe n_layer
+
+# %% 
+# TODO ex: why are the sums of W_U approx 0?
 
 # %%
 # Visualise cross-orthogonality between linear probes, across layers and features
 # Visualise additivity between exhaustive probe spaces (e.g. theirs + empty + mine = 1, flipped + not flipped = 1)
-otheirs = linear_probe_otem[:, :, :, 0].flatten(1, -2)#[:, all_squares]
-oempty = linear_probe_otem[:, :, :, 1].flatten(1, -2)#[:, all_squares]
-omine = linear_probe_otem[:, :, :, 2].flatten(1, -2)#[:, all_squares]
-theirs = linear_probe_tem[:, :, :, 0].flatten(1, -2)#[:, all_squares]
-empty = linear_probe_tem[:, :, :, 1].flatten(1, -2)#[:, all_squares]
-mine = linear_probe_tem[:, :, :, 2].flatten(1, -2)#[:, all_squares]
-flipped = linear_probe_flips[:, :, :, 0].flatten(1, -2)#[:, all_squares]
-not_flipped = linear_probe_flips[:, :, :, 1].flatten(1, -2)#[:, all_squares]
+otheirs = linear_probe_otem[:, :, :, 0].flatten(1, -2)[:, all_squares]
+oempty = linear_probe_otem[:, :, :, 1].flatten(1, -2)[:, all_squares]
+omine = linear_probe_otem[:, :, :, 2].flatten(1, -2)[:, all_squares]
+theirs = linear_probe_tem[:, :, :, 0].flatten(1, -2)[:, all_squares]
+empty = linear_probe_tem[:, :, :, 1].flatten(1, -2)[:, all_squares]
+mine = linear_probe_tem[:, :, :, 2].flatten(1, -2)[:, all_squares]
+flipped = linear_probe_flips[:, :, :, 0].flatten(1, -2)[:, all_squares]
+not_flipped = linear_probe_flips[:, :, :, 1].flatten(1, -2)[:, all_squares]
 r0 = t.randn_like(theirs)
 r1 = t.randn_like(r0)
+unembed = einops.repeat(model.W_U[:, 1:], "d_model n_vocab -> d_model n_vocab n_layer", n_layer=otheirs.shape[-1]).detach().cpu()
 names = [
     "otheirs",
     # "oempty",
@@ -394,7 +353,8 @@ names = [
     # "omine+not_flipped",
     # "r0",
     # "r1",
-]
+    "unembed",
+] # TODO add W_U
 layers = [f"L{i}" for i in range(linear_probe_tem.shape[-1])]
 probes = t.stack([
     otheirs,
@@ -411,6 +371,7 @@ probes = t.stack([
     # omine + not_flipped,
     # r0,
     # r1,
+    unembed,
 ])
 probes /= probes.norm(dim=1, keepdim=True)
 dots = einops.einsum(probes, probes, "probe_0 d_model n layer_0, probe_1 d_model n layer_1 -> n probe_0 probe_1 layer_0 layer_1")
@@ -471,7 +432,24 @@ fig.update_layout(
 fig.show()
 
 # %%
-n_focus = 100
+# Visualise orthogonality between feature probes for different squares
+all_probes = [linear_probe_otem, linear_probe_tem, linear_probe_flips]
+all_probes = t.cat([p[:, :, :, :, 1:-1] for p in all_probes], dim=-2)
+all_probes /= all_probes.norm(dim=0, keepdim=True)
+positional_dots = einops.einsum(all_probes[:, :size//2, :size//2], all_probes, "d_model r0 c0 n_probe n_layer, d_model r1 c1 n_probe n_layer -> r0 c0 r1 c1 n_probe n_layer")
+# positional_dots[*(range(size) for _ in range(4))] = 0
+positional_dots = einops.reduce(positional_dots, "r0 c0 r1 c1 n_probe n_layer -> (r0 c0 n_probe) r1 c1", "mean")
+plot_game(
+    {"boards": positional_dots},
+    hovertext=positional_dots,
+    reversed=False,
+    subplot_titles=[f"{chr(ord('A') + x)}{y + 1} {p}" for y in range(size//2) for x in range(size//2) for p in ["ot", "oe", "om", "t", "e", "m", "f", "nf"]],
+    shift_legalities=False,
+    n_cols=12,
+)
+
+# %%
+n_focus = 1000
 focus_games = dataset_dict["test"].take(n_focus)
 focus_input_ids = t.tensor(focus_games["input_ids"], device=device)
 # focus_logprobs = model(focus_input_ids[:, :-1])
@@ -486,6 +464,7 @@ focus_prob_boards.flatten(2)[..., all_squares] = focus_probs[..., 1:].detach().c
 focus_otem_boards = original_colour_target(focus_games).cpu()
 focus_tem_boards = theirs_empty_mine_target(focus_games).cpu()
 focus_flip_boards = captures_target(focus_games).cpu()
+focus_flip_parity = flip_parity_target(focus_games).cpu()
 
 # X, labels = focus_cache.accumulated_resid(incl_mid=True, return_labels=True)
 # y = target_fn(focus_games)
@@ -604,16 +583,7 @@ for layer, name in enumerate(labels):
 # Can we construct a NN that does the same job?
 
 # %%
-# Check model accuracy over different subsets
-# Subset 1: never flipped vs other
-initial_board = t.zeros((size, size))
-initial_board[[2, 3], [2, 3]] = 1
-initial_board[[2, 3], [3, 2]] = -1
-focus_boards = t.tensor(focus_games["boards"])
-focus_boards = t.cat(
-    [initial_board.unsqueeze(0).unsqueeze(0).repeat(n_focus, 1, 1, 1), focus_boards],
-    dim=1,
-)
+# See how n flips affects accuracy
 focus_n_flips = focus_flip_boards.flatten(-2, -1).sum(dim=-1)
 
 focus_coords_pred = focus_logit_boards.view(
@@ -623,58 +593,32 @@ focus_coords_pred = t.stack(
     (focus_coords_pred // size, focus_coords_pred % size), dim=-1
 )
 focus_legalities = t.tensor(focus_games["legalities"])[:, 1:]
-focus_legal_predictions = t.zeros((n_focus, focus_coords_pred.shape[1]), dtype=t.bool)
+
+focus_pred_is_legal = t.zeros((n_focus, focus_coords_pred.shape[1]), dtype=t.bool)
 for i in range(n_focus):
     for j in range(focus_coords_pred.shape[1]):
         y, x = focus_coords_pred[i, j]
-        focus_legal_predictions[i, j] = focus_legalities[i, j, y, x]
-focus_legal_predictions.float().mean()
+        focus_pred_is_legal[i, j] = focus_legalities[i, j, y, x]
 
-# %%
-# Plot model legality and number of flips over each pos
+cond_accs = t.tensor([
+    (
+        focus_n_flips[:, i][focus_pred_is_legal[:,i]].float().mean(),
+        focus_n_flips[:, i][~focus_pred_is_legal[:, i]].float().mean(),
+    )
+    for i in range(model.cfg.n_ctx)
+])
 fig = go.Figure()
 
-fig.add_trace(
-    go.Scatter(y=focus_legal_predictions.float().mean(dim=0), name="Model legality")
-)
-fig.add_trace(
-    go.Scatter(
-        y=focus_n_flips.cpu().float().mean(dim=0), name="Number of Flips", yaxis="y2"
-    )
-)
+fig.add_trace(go.Scatter(y=cond_accs[:, 0], mode='lines', name='Mean Flips (Legal)'))
+fig.add_trace(go.Scatter(y=cond_accs[:, 1], mode='lines', name='Mean Flips (Illegal)'))
+
 fig.update_layout(
-    xaxis=dict(title="0-indexed move #"),
-    yaxis=dict(
-        title="Model legality",
-    ),
-    yaxis2=dict(title="Number of Flips", overlaying="y", side="right"),
+    title="Mean Number of Flips for Legal and Illegal Moves",
+    xaxis=dict(title="Move #"),
+    yaxis=dict(title="Mean Number of Flips"),
 )
 
 fig.show()
-
-# %%
-# Plot boards where the model predicted an illegal move
-wrong_indices = (focus_legal_predictions == 0).nonzero()[:70]
-test_pred_wrong = {
-    "boards": eindex(focus_prob_boards, wrong_indices, "[n 0] [n 1] n_focus pos"),
-    "legalities": eindex(focus_legalities, wrong_indices, "[n 0] [n 1] n_focus pos"),
-}
-plot_game(
-    test_pred_wrong,
-    reversed=False,
-    textcolor="red",
-    hovertext=test_pred_wrong["boards"],
-    title="Wrong model predictions",
-    subplot_titles=list(map(str, wrong_indices.tolist())),
-    shift_legalities=False,
-    n_cols=7,
-)
-
-# Test whether n_flips within a narrow pos range affect accuracy
-
-
-# %%
-print(t.tensor(focus_games["legalities"]).shape)
 
 # %%
 # Find out how H0 constructs an 89% accurate board state

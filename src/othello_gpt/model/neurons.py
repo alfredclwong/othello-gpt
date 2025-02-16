@@ -7,7 +7,7 @@ import einops
 import numpy as np
 from transformer_lens import HookedTransformerConfig, HookedTransformer
 import plotly.graph_objects as go
-from typing import Union, List, Optional
+from typing import Union, List, Optional, Callable
 from jaxtyping import Float
 from transformer_lens import ActivationCache
 import circuitsvis as cv
@@ -43,7 +43,13 @@ device = t.device(
 size = 6
 all_squares = get_all_squares(size)
 
-linear_probe = t.load(probe_dir / "linear_probe_20250206_194246.pt", weights_only=True)
+probes = {
+    "otem": t.load(probe_dir / "linear_probe_20250213_221416_mid_otem.pt", weights_only=True, map_location=device),
+    "tem": t.load(probe_dir / "linear_probe_20250212_141120_mid_tem.pt", weights_only=True, map_location=device),
+    "f": t.load(probe_dir / "linear_probe_20250213_000355_mid_flips.pt", weights_only=True, map_location=device),
+}
+probes = {k: p / p.norm(dim=0, keepdim=True) for k, p in probes.items()}
+{k: p.shape for k, p in probes.items()}
 
 # %%
 class HubGPT(GPT, hf.PyTorchModelHubMixin):
@@ -82,51 +88,80 @@ model.load_and_process_state_dict(state_dict)
 model.to(device)
 
 # %%
-n_layer = 2
-n_neuron = 512
+def plot_in_basis(
+    vectors: Float[t.Tensor, "n d_model"],
+    probe: Float[t.Tensor, "d_model row col"],
+    labels: List[str] = [],
+    sort_fn: Optional[Callable] = None,
+    top_n: int = 0,
+):
+    # transform data vectors, e.g. neuron w_outs to a different basis, e.g. probe and visualise
+    transformed_vectors = einops.einsum(
+        vectors, probe,
+        "n d_model, d_model row col -> n row col",
+    )
+    sorted_indices = np.argsort(sort_fn(transformed_vectors))
+    if top_n != 0:
+        sorted_indices = sorted_indices[:top_n]
+    transformed_vectors = transformed_vectors[sorted_indices]
+    labels = labels[sorted_indices]
+    plot_game(
+        {"boards": transformed_vectors},
+        n_cols=5,
+        hovertext=transformed_vectors,
+        reversed=False,
+        subplot_titles=labels,
+    )
+
+
+# %%
+linear_probe = probes["f"][..., [2, 4]]
+n_layer = model.cfg.n_layers
+n_neuron = model.cfg.d_model * 4
 w_out = model.W_out[:, :n_neuron]
 w_out /= w_out.norm(dim=-1, keepdim=True)
 w_in = model.W_in[:, :n_neuron].transpose(1, 2)
 w_in /= w_in.norm(dim=-1, keepdim=True)
 w_u = model.W_U[:, 1:].clone()
-w_u /= w_u.norm(dim=0, keepdim=True)
-probe_normed = linear_probe[..., 1].clone()
-probe_normed /= probe_normed.norm(dim=0, keepdim=True)
-print(probe_normed.shape)
+w_u_board = t.zeros((w_u.shape[0], size, size), device=device)
+w_u_board.flatten(1)[:, all_squares] = w_u
+w_u_board /= w_u_board.norm(dim=0, keepdim=True)
 
 # %%
-neuron_unembed_board = t.full((n_layer, n_neuron, size, size), 0.0, device=device)
-neuron_unembed_board.flatten(-2)[..., all_squares] = einops.einsum(
-    w_out, w_u,
-    "n_layer n_neuron d_model, d_model n_vocab -> n_layer n_neuron n_vocab"
-)
-neuron_unembed_board = neuron_unembed_board.flatten(0, 1).detach().cpu()
+# neuron_unembed_board = t.full((n_layer, n_neuron, size, size), 0.0, device=device)
+# neuron_unembed_board.flatten(-2)[..., all_squares] = einops.einsum(
+#     w_out, w_u,
+#     "n_layer n_neuron d_model, d_model n_vocab -> n_layer n_neuron n_vocab"
+# )
+# neuron_unembed_board = neuron_unembed_board.flatten(0, 1).detach().cpu()
 labels = [f"L{l} N{n}" for l in range(n_layer) for n in range(n_neuron)]
 
+sort_fn = lambda x: kurtosis(x.numpy(), axis=(1, 2), fisher=False)
 # sort by kurtosis (should find sparse neurons)
-kurt_vals = kurtosis(neuron_unembed_board.numpy(), axis=(1, 2), fisher=False)
-sorted_indices = np.argsort(-kurt_vals)[:128]
+# kurt_vals = kurtosis(neuron_unembed_board.numpy(), axis=(1, 2), fisher=False)
+# sorted_indices = np.argsort(-kurt_vals)[:128]
 
 # sort by abs value of A1 square
 # a1_abs = neuron_unembed_board[:, 0, 0].abs()
 # sorted_indices = t.argsort(-a1_abs)[:128]
 
-neuron_unembed_board = neuron_unembed_board[sorted_indices]
-labels = [labels[i] for i in sorted_indices]
+# neuron_unembed_board = neuron_unembed_board[sorted_indices]
+# labels = [labels[i] for i in sorted_indices]
 
-plot_game(
-    {"boards": neuron_unembed_board},
-    n_cols=5,
-    hovertext=neuron_unembed_board,
-    reversed=False,
-    subplot_titles=labels,
-)
+# plot_game(
+#     {"boards": neuron_unembed_board},
+#     n_cols=5,
+#     hovertext=neuron_unembed_board,
+#     reversed=False,
+#     subplot_titles=labels,
+# )
+
+plot_in_basis(w_out.flatten(0, 1).detach().cpu(), w_u_board.detach().cpu(), labels, sort_fn, top_n=50)
 
 # %%
-
 w_out_probed_board = einops.einsum(
     w_out,
-    probe_normed[..., 0],  # 0 = theirs, 1 = empty, 2 = mine
+    probes["f"][..., 0, 2],
     "layer n_neuron d_model, d_model row col -> layer n_neuron row col"
 )
 w_out_probed_board = w_out_probed_board.flatten(0, 1).detach().cpu()
@@ -135,7 +170,8 @@ labels = [f"L{l} N{n}" for l in range(n_layer) for n in range(n_neuron)]
 
 # sort by kurtosis (should find sparse neurons)
 kurt_vals = kurtosis(w_out_probed_board.numpy(), axis=(1, 2), fisher=False)
-sorted_indices = np.argsort(-kurt_vals)[:50]
+# sorted_indices = np.argsort(-kurt_vals)[:50]
+sorted_indices = np.arange(50)
 
 w_out_probed_board = w_out_probed_board[sorted_indices]
 labels = [labels[i] for i in sorted_indices]
@@ -151,7 +187,7 @@ plot_game(
 # %%
 w_in_probed_board = einops.einsum(
     w_in,
-    probe_normed[..., 0],  # 0 = theirs, 1 = empty, 2 = mine
+    probes["f"][..., 0, 2],
     "layer n_neuron d_model, d_model row col -> layer n_neuron row col"
 )
 w_in_probed_board = w_in_probed_board.flatten(0, 1).detach().cpu()
@@ -160,7 +196,8 @@ labels = [f"L{l} N{n}" for l in range(n_layer) for n in range(n_neuron)]
 
 # sort by kurtosis (should find sparse neurons)
 kurt_vals = kurtosis(w_in_probed_board.numpy(), axis=(1, 2), fisher=False)
-sorted_indices = np.argsort(-kurt_vals)[:50]
+# sorted_indices = np.argsort(-kurt_vals)[:50]
+sorted_indices = np.arange(50)
 
 w_in_probed_board = w_in_probed_board[sorted_indices]
 labels = [labels[i] for i in sorted_indices]
@@ -298,6 +335,7 @@ def visualize_attention_patterns(
     patterns: Float[t.Tensor, "head_index dest_pos src_pos"] = t.stack(
         patterns, dim=0
     )
+    patterns *= (t.arange(patterns.shape[1]) + 1).unsqueeze(0).unsqueeze(-1)
 
     # Circuitsvis Plot (note we get the code version so we can concatenate with the title)
     plot = cv.circuitsvis.attention.attention_heads(
