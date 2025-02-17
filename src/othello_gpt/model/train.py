@@ -23,7 +23,6 @@ device
 # %%
 root_dir = Path().cwd().parent.parent.parent
 data_dir = root_dir / "data"
-n_games = 1000000
 size = 6
 
 hf.login(token=(root_dir / "secret.txt").read_text())
@@ -41,11 +40,11 @@ cfg = GPTConfig(
     # block_size=(size * size - 4) * 2 - 1,
     block_size=(size * size - 4) - 1,
     # vocab_size=size * size - 4 + 2,  # pass and pad
-    vocab_size=size * size - 4 + 1,  # pad
+    vocab_size=size * size - 4,  # no pad
     n_layer=2,
-    n_head=2,
-    n_embd=128,
-    dropout= 0.0,
+    n_head=4,
+    n_embd=256,
+    dropout=0.0,
     bias=False,
 )
 print(cfg)
