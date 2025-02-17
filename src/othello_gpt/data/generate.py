@@ -13,18 +13,25 @@ from tqdm.contrib.concurrent import process_map
 
 from othello_gpt.data.vis import move_id_to_coord, move_id_to_text
 from othello_gpt.othello import OthelloState, get_legal_move_ids, is_terminal, make_move
-from othello_gpt.util import tokenize
+from othello_gpt.util import tokenize, get_id_to_token_id_map
 
 
 def generate_game(size: int, no_pass: bool = True) -> Dict[str, List]:
-    legalities = []
-    moves = []
-    coords = []
-    squares = []
-    boards = []
-    flips = []
+    game_dict = {
+        "legalities": [],  # these are the legal squares for the current move (i.e. previous board!) TODO shift and refactor
+        "moves": [],
+        "coords": [],
+        "squares": [],
+        "boards": [],
+        "flips": [],
+        "originals": [],
+        "input_ids": [],
+    }
+
+    id_to_token_id_map = get_id_to_token_id_map(size)
 
     state = OthelloState(size)
+    cum_originals = state.board.copy()
 
     while not is_terminal(state):
         legal_move_ids = get_legal_move_ids(state, no_pass=no_pass)
@@ -32,30 +39,27 @@ def generate_game(size: int, no_pass: bool = True) -> Dict[str, List]:
         if not legal_move_ids:
             return generate_game(size, no_pass=no_pass)
 
-        legalities.append(np.zeros((size, size), dtype=bool))
+        game_dict["legalities"].append(np.zeros((size, size), dtype=bool))
         for move_id in legal_move_ids:
             if move_id != size * size:
-                legalities[-1][*divmod(move_id, size)] = 1
+                game_dict["legalities"][-1][*divmod(move_id, size)] = 1
 
         move_id = np.random.choice(legal_move_ids)
-        moves.append(move_id)
-        coords.append(move_id_to_coord(move_id, size))
-        squares.append(move_id_to_text(move_id, size))
+        game_dict["moves"].append(move_id)
+        game_dict["coords"].append(move_id_to_coord(move_id, size))
+        game_dict["squares"].append(move_id_to_text(move_id, size))
+        game_dict["input_ids"].append(id_to_token_id_map[move_id])
+
+        cum_originals[game_dict["coords"][-1]] = state.turn
+        game_dict["originals"].append(cum_originals.copy())
 
         state, _flips = make_move(state, move_id, validate=False)
-        boards.append(state.board)
-        flips.append(np.zeros((size, size), dtype=bool))
+        game_dict["boards"].append(state.board)
+        game_dict["flips"].append(np.zeros((size, size), dtype=bool))
         for y, x in _flips:
-            flips[-1][y, x] = 1
+            game_dict["flips"][-1][y, x] = 1
 
-    return {
-        "legalities": legalities,  # these are the legal squares for the current move (i.e. previous board!) TODO shift and refactor
-        "moves": moves,
-        "coords": coords,
-        "squares": squares,
-        "boards": boards,
-        "flips": flips,
-    }
+    return game_dict
 
 
 def generate_batch(args) -> Path:
@@ -77,6 +81,7 @@ def generate_dataset(
     batch_size: int = 10000,
     no_pass: bool = True,
 ) -> Dataset:
+    batch_size = min(n_games, batch_size)
     n_batch = (n_games - 1) // batch_size + 1
     tmp_files: List[Path] = process_map(
         generate_batch,
@@ -92,50 +97,16 @@ def generate_dataset(
     return final_dataset
 
 
-def original_colour_target(batch, size):
-    coords = t.tensor(batch["coords"])
-    n_batch = coords.shape[0]
-    original_colour_boards = t.zeros((n_batch, size, size), dtype=int)
-    for i in range(n_batch):
-        original_colour_boards[i, coords[i, ::2, 0], coords[i, ::2, 1]] = 1
-        original_colour_boards[i, coords[i, 1::2, 0], coords[i, 1::2, 1]] = -1
-
-    boards = t.tensor(batch["boards"])
-    empty = boards == 0
-    original_colour_boards = einops.repeat(original_colour_boards, "n_batch row col -> n_batch pos row col", pos=boards.shape[1])
-    original_colour_boards = t.where(empty, 0, original_colour_boards)
-    original_colour_boards[:, [2, 3], [2, 3]] = 1
-    original_colour_boards[:, [2, 3], [3, 2]] = -1
-    original_colour_boards[:, 1::2] *= -1
-    return original_colour_boards
-
-
 if __name__ == "__main__":
     from pathlib import Path
 
     root_dir = Path().cwd()
     hf.login((root_dir / "secret.txt").read_text())
 
-    n_games = 2000000
+    n_games = 1000000
     size = 6
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         dataset = generate_dataset(Path(tmp_dir), n_games, size)
         dataset_dict = dataset.train_test_split(test_size=0.1)
-        dataset_dict["test"] = dataset_dict["test"].map(
-            lambda x: original_colour_target(x, size),
-            batched=True,
-        )
-        dataset_dict["train"] = dataset_dict["train"].map(
-            lambda x: original_colour_target(x, size),
-            batched=True,
-        )
-        dataset_dict["test"] = dataset_dict["test"].map(
-            lambda x: tokenize(x["moves"], size),
-            batched=True,
-        )
-        dataset_dict["train"] = dataset_dict["train"].map(
-            lambda x: tokenize(x["moves"], size),
-            batched=True,
-        )
         dataset_dict.push_to_hub("awonga/othello-gpt")
