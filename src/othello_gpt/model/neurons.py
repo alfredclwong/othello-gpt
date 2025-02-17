@@ -101,6 +101,7 @@ def plot_in_basis(
     vectors: Float[t.Tensor, "n d_model"],
     probe: Float[t.Tensor, "d_model row col"],
     labels: List[str],
+    filter_by: str = "",
     sort_by: str = "kurtosis",
     top_n: int = 0,
     title: str = "",
@@ -110,6 +111,16 @@ def plot_in_basis(
         vectors, probe,
         "n d_model, d_model row col -> n row col",
     )
+
+    abs_max_indices = transformed_vectors.flatten(1).abs().max(dim=1)[1]
+    abs_max_sign = t.sign(transformed_vectors.flatten(1)[t.arange(transformed_vectors.shape[0]), abs_max_indices])
+    if filter_by == "pos":
+        transformed_vectors = transformed_vectors[abs_max_sign > 0]
+        labels = [labels[i] for i in range(len(labels)) if abs_max_sign[i] > 0]
+    elif filter_by == "neg":
+        transformed_vectors = transformed_vectors[abs_max_sign < 0]
+        labels = [labels[i] for i in range(len(labels)) if abs_max_sign[i] < 0]
+
     if sort_by == "kurtosis":
         kurts = kurtosis(transformed_vectors, axis=(1, 2), fisher=False)
         sorted_indices = np.argsort(-kurts)
@@ -119,6 +130,7 @@ def plot_in_basis(
         sorted_indices = sorted_indices[:top_n]
     transformed_vectors = transformed_vectors[sorted_indices]
     labels = [labels[i] for i in sorted_indices]
+
     plot_game(
         {"boards": transformed_vectors},
         n_cols=5,
@@ -145,10 +157,17 @@ probes["u"] = einops.repeat(w_u_board, "d_model row col -> d_model row col n", n
 
 # %%
 labels = [f"L{l} N{n}" for l in range(n_layer) for n in range(n_neuron)]
-plot_in_basis(w_in.flatten(0, 1), probes["u"][..., 2], labels, top_n=10, title="w_in . w_u")
-plot_in_basis(w_out.flatten(0, 1), probes["u"][..., 2], labels, top_n=10, title="w_out . w_u")
-plot_in_basis(w_in.flatten(0, 1), probes["f"][..., 2], labels, top_n=10, title="w_in . f2")
-plot_in_basis(w_out.flatten(0, 1), probes["f"][..., 2], labels, top_n=10, title="w_out . f2")
+plot_in_basis(w_in.flatten(0, 1), probes["u"][..., 2], labels, top_n=10, title="w_in . w_u (+ve)", filter_by="pos")
+plot_in_basis(w_in.flatten(0, 1), probes["u"][..., 2], labels, top_n=10, title="w_in . w_u (-ve)", filter_by="neg")
+plot_in_basis(w_out.flatten(0, 1), probes["u"][..., 2], labels, top_n=10, title="w_out . w_u (+ve)", filter_by="pos")
+plot_in_basis(w_out.flatten(0, 1), probes["u"][..., 2], labels, top_n=10, title="w_out . w_u (-ve)", filter_by="neg")
+plot_in_basis(w_in.flatten(0, 1), probes["f"][..., 2], labels, top_n=10, title="w_in . f2 (+ve)", filter_by="pos")
+plot_in_basis(w_in.flatten(0, 1), probes["f"][..., 2], labels, top_n=10, title="w_in . f2 (-ve)", filter_by="neg")
+plot_in_basis(w_out.flatten(0, 1), probes["f"][..., 2], labels, top_n=10, title="w_out . f2 (+ve)", filter_by="pos")
+plot_in_basis(w_out.flatten(0, 1), probes["f"][..., 2], labels, top_n=10, title="w_out . f2 (-ve)", filter_by="neg")
+
+# %%
+t.randn((1, 2, 3, 4)).flatten(2).max(2)[0]
 
 # %%
 def plot_neuron_excess_kurtosis(
@@ -162,13 +181,27 @@ def plot_neuron_excess_kurtosis(
     w_in_probed = einops.einsum(
         w_in, probe,
         "n_layer n_neuron d_model, d_model row col -> n_layer n_neuron row col"
-    ).detach()
+    )
     w_out_probed = einops.einsum(
         w_out, probe,
         "n_layer n_neuron d_model, d_model row col -> n_layer n_neuron row col"
-    ).detach()
+    )
     w_in_ekurt = kurtosis(w_in_probed, axis=(2, 3), fisher=False) - 3
     w_out_ekurt = kurtosis(w_out_probed, axis=(2, 3), fisher=False) - 3
+
+    w_in_probed_flat = w_in_probed.flatten(2)
+    w_out_probed_flat = w_out_probed.flatten(2)
+
+    w_in_sign = t.sign(w_in_probed_flat[t.arange(w_in_probed_flat.shape[0])[:, None], t.arange(w_in_probed_flat.shape[1]), w_in_probed_flat.abs().argmax(dim=2)])
+    w_out_sign = t.sign(w_out_probed_flat[t.arange(w_out_probed_flat.shape[0])[:, None], t.arange(w_out_probed_flat.shape[1]), w_out_probed_flat.abs().argmax(dim=2)])
+    w_in_sign = w_in_sign.numpy()
+    w_out_sign = w_out_sign.numpy()
+
+    w_in_ekurt_pos = w_in_ekurt * (w_in_sign > 0)
+    w_in_ekurt_neg = w_in_ekurt * (w_in_sign < 0)
+    w_out_ekurt_pos = w_out_ekurt * (w_out_sign > 0)
+    w_out_ekurt_neg = w_out_ekurt * (w_out_sign < 0)
+    print(row, col, (w_in_sign < 0).sum(), (w_in_sign > 0).sum(), (w_out_sign < 0).sum(), (w_out_sign > 0).sum())
 
     if fig is None:
         fig = go.Figure()
@@ -176,15 +209,29 @@ def plot_neuron_excess_kurtosis(
     for layer in range(w_in_ekurt.shape[0]):
         fig.add_trace(
             go.Box(
-                y=w_in_ekurt[layer],
-                name=f'Layer {layer} w_in',
+                y=w_in_ekurt_neg[layer],
+                name=f'L{layer} w_in-',
                 boxmean=True,
             ), row=row, col=col,
         )
         fig.add_trace(
             go.Box(
-                y=w_out_ekurt[layer],
-                name=f'Layer {layer} w_out',
+                y=w_in_ekurt_pos[layer],
+                name=f'L{layer} w_in+',
+                boxmean=True,
+            ), row=row, col=col,
+        )
+        fig.add_trace(
+            go.Box(
+                y=w_out_ekurt_neg[layer],
+                name=f'L{layer} w_out-',
+                boxmean=True,
+            ), row=row, col=col,
+        )
+        fig.add_trace(
+            go.Box(
+                y=w_out_ekurt_pos[layer],
+                name=f'L{layer} w_out+',
                 boxmean=True,
             ), row=row, col=col,
         )
