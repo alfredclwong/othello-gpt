@@ -17,7 +17,13 @@ from othello_gpt.model.nanoGPT import GPT, GPTConfig
 from othello_gpt.util import pad_batch, get_all_squares
 
 # %%
-device = t.device("mps" if t.backends.mps.is_available() else "cuda" if t.cuda.is_available() else "cpu")
+device = t.device(
+    "mps"
+    if t.backends.mps.is_available()
+    else "cuda"
+    if t.cuda.is_available()
+    else "cpu"
+)
 device
 
 # %%
@@ -30,38 +36,42 @@ wandb.login()
 
 # %%
 dataset_dict = load_dataset("awonga/othello-gpt")
-plot_game(dataset_dict["test"][0], subplot_size=180, n_cols=8)
+# plot_game(dataset_dict["test"][0], subplot_size=180, n_cols=8)
+
 
 # %%
 class HubGPT(GPT, hf.PyTorchModelHubMixin):
     pass
 
+
 cfg = GPTConfig(
-    # block_size=(size * size - 4) * 2 - 1,
     block_size=(size * size - 4) - 1,
-    # vocab_size=size * size - 4 + 2,  # pass and pad
     vocab_size=size * size - 4,  # no pad
-    n_layer=2,
-    n_head=4,
-    n_embd=256,
+    n_layer=30,
+    n_head=8,
+    n_embd=36 * 4,
     dropout=0.0,
-    bias=False,
+    bias=True,
 )
 print(cfg)
 model = HubGPT(cfg).to(device)
 
+
 # %%
 @dataclass
 class TransformerTrainingArgs:
-    batch_size: int = 1024
-    epochs: int = 32
+    batch_size: int = 256
+    epochs: int = 16
     max_steps_per_epoch: int = 1000
-    lr: int = 5e-4
+    lr: int = 1e-3
     weight_decay: int = 1e-3
+    betas: tuple[float, float] = (0.9, 0.99)
     wandb_project: str | None = "othello-gpt"
     wandb_name: str | None = None
 
+
 args = TransformerTrainingArgs()
+
 
 # %%
 class TransformerTrainer:
@@ -70,14 +80,31 @@ class TransformerTrainer:
         self.model = model
         self.args = args
 
-        self.optimizer = t.optim.AdamW(self.model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        self.optimizer = t.optim.AdamW(
+            self.model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            betas=args.betas,
+        )
         self.step = 0
 
         def collate_fn(batch):
             return pad_batch(batch, model.config.block_size + 1)
 
-        self.train_loader = DataLoader(dataset_dict["train"]["input_ids"], batch_size=args.batch_size, shuffle=True, pin_memory=True, collate_fn=collate_fn)
-        self.test_loader = DataLoader(dataset_dict["test"]["input_ids"], batch_size=args.batch_size, shuffle=False, pin_memory=True, collate_fn=collate_fn)
+        self.train_loader = DataLoader(
+            dataset_dict["train"]["input_ids"],
+            batch_size=args.batch_size,
+            shuffle=True,
+            pin_memory=True,
+            collate_fn=collate_fn,
+        )
+        self.test_loader = DataLoader(
+            dataset_dict["test"]["input_ids"],
+            batch_size=args.batch_size,
+            shuffle=False,
+            pin_memory=True,
+            collate_fn=collate_fn,
+        )
 
     def training_step(self, batch: Int[Tensor, "batch seq"]) -> Float[Tensor, ""]:
         """
@@ -119,7 +146,11 @@ class TransformerTrainer:
         """
         config_dict = model.config.__dict__.copy()
         config_dict.update(args.__dict__)
-        wandb.init(project=self.args.wandb_project, name=self.args.wandb_name, config=config_dict)
+        wandb.init(
+            project=self.args.wandb_project,
+            name=self.args.wandb_name,
+            config=config_dict,
+        )
         accuracy = np.nan
 
         progress_bar = tqdm(total=self.args.max_steps_per_epoch * self.args.epochs)
@@ -128,7 +159,9 @@ class TransformerTrainer:
             for i, batch in enumerate(self.train_loader):
                 loss = self.training_step(batch.to(device))
                 progress_bar.update()
-                progress_bar.set_description(f"Epoch {epoch+1}, loss: {loss:.3f}, accuracy: {accuracy:.3f}")
+                progress_bar.set_description(
+                    f"Epoch {epoch + 1}, loss: {loss:.3f}, accuracy: {accuracy:.3f}"
+                )
                 if i >= self.args.max_steps_per_epoch:
                     break
 
@@ -136,11 +169,12 @@ class TransformerTrainer:
 
         wandb.finish()
 
+
 trainer = TransformerTrainer(args, model)
 trainer.train()
 
 # %%
-model.push_to_hub("awonga/othello-gpt")
+model.push_to_hub("awonga/othello-gpt-7M")
 
 # %%
 n_focus = 50
@@ -150,7 +184,7 @@ focus_input_ids = pad_batch(focus_games["input_ids"], max_len=cfg.block_size + 1
 )
 focus_logits, loss = model(focus_input_ids[:, :-1], focus_input_ids[:, 1:])
 focus_logit_boards = t.full((n_focus, focus_logits.shape[1], size, size), 0.0)
-focus_logit_boards.flatten(2)[..., get_all_squares(size)] = focus_logits[..., 1:].detach().cpu()
+focus_logit_boards.flatten(2)[..., get_all_squares(size)] = focus_logits.detach().cpu()
 
 # %%
 test_index = 0
@@ -168,3 +202,5 @@ plot_game(
     hovertext=test_pred_model["boards"],
     title="Model predictions for legal moves",
 )
+
+# %%

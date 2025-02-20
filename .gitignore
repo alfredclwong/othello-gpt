@@ -1,8 +1,10 @@
 /src/othello_gpt/model/wandb/
 /data/probes/*.pt
-!/data/probes/linear_probe_20250212_141120_mid_tem.pt
-!/data/probes/linear_probe_20250213_000355_mid_flips.pt
-!/data/probes/linear_probe_20250213_221416_mid_otem.pt
+!data/probes/linear_probe_20250220_002442_legal_7M.pt
+!data/probes/linear_probe_20250220_004630_cap_7M.pt
+!data/probes/linear_probe_20250220_011503_tem_7M.pt
+!data/probes/linear_probe_20250220_144128_tem_caps_7M.pt
+!data/probes/linear_probe_20250220_162609_ptem_7M.pt
 .DS_Store
 scratch.ipynb
 *secret*

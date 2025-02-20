@@ -1,15 +1,133 @@
 from typing import List
+import huggingface_hub as hf
+from pathlib import Path
 
 import einops
 import torch as t
 from bidict import bidict
-from jaxtyping import Int
+from jaxtyping import Int, Float
 from torch import Tensor
-from transformer_lens import HookedTransformerConfig
+from transformer_lens import HookedTransformerConfig, HookedTransformer
 
-from othello_gpt.model.nanoGPT import GPTConfig
+from othello_gpt.model.nanoGPT import GPTConfig, GPT
 
 PAD_TOKEN = -1
+
+
+def load_probes(probe_dir: Path, device, w_u=None, w_e=None, normed=True, combos=[]):
+    probe_names = {
+        "tem": "linear_probe_20250220_011503_tem_7M.pt",
+        (None, "c"): "linear_probe_20250220_004630_cap_7M.pt",
+        (None, "l"): "linear_probe_20250220_002442_legal_7M.pt",
+        # ("tc", "nc", "mc"): "linear_probe_20250220_144128_tem_caps_7M.pt",
+        ("pt", "pe", "pm"): "linear_probe_20250220_162609_ptem_7M.pt",
+    }
+
+    probes = {}
+    for names, file in probe_names.items():
+        probe = t.load(
+            probe_dir / file, weights_only=True, map_location=device
+        ).detach()
+        for i, n in enumerate(names):
+            if n is None:
+                continue
+            probes[n] = probe[..., i, :]
+
+    n_probe_layers = probes["t"].shape[-1]
+
+    if w_u is not None:
+        probes["u"] = einops.repeat(
+            vocab_to_board(w_u),
+            "d_model row col -> d_model row col n",
+            n=n_probe_layers,
+        )
+
+    if w_e is not None:
+        probes["b"] = einops.repeat(
+            vocab_to_board(w_e),
+            "d_model row col -> d_model row col n",
+            n=n_probe_layers,
+        )
+
+    if normed:
+        for k in probes:
+            norm = probes[k].norm(dim=0, keepdim=True)
+            norm = norm.nan_to_num(1)
+            probes[k] = probes[k] / norm
+
+    for combo in combos:
+        probes[combo] = probes[combo[0]].clone()
+        for s, k in zip(combo[1::2], combo[2::2]):
+            if s == "+":
+                probes[combo] += probes[k].clone()
+            elif s == "-":
+                probes[combo] -= probes[k].clone()
+
+        if normed:
+            norm = probes[combo].norm(dim=0, keepdim=True)
+            norm = norm.nan_to_num(1)
+            probes[combo] = probes[combo] / norm
+
+    return probes
+
+
+def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
+    class HubGPT(GPT, hf.PyTorchModelHubMixin):
+        pass
+
+    if name == "awonga/othello-gpt":
+        size = 6
+        n_layer = 2
+        n_head = 4
+        n_embd = 256
+        bias = True
+    elif name == "awonga/othello-gpt-30l":
+        size = 6
+        n_layer = 30
+        n_head = 2
+        n_embd = 108
+        bias = False
+    elif name == "awonga/othello-gpt-7M":
+        size = 6
+        n_layer = 30
+        n_head = 8
+        n_embd = 144
+        bias = True
+    else:
+        raise ValueError(name)
+
+    nano_cfg = GPTConfig(
+        block_size=(size * size - 4) - 1,
+        vocab_size=size * size - 4,  # no pad
+        n_layer=n_layer,
+        n_head=n_head,
+        n_embd=n_embd,
+        dropout=0.0,
+        bias=bias,
+    )
+    hooked_cfg = HookedTransformerConfig(
+        n_layers=nano_cfg.n_layer,
+        d_model=nano_cfg.n_embd,
+        n_ctx=nano_cfg.block_size,
+        d_head=nano_cfg.n_embd // nano_cfg.n_head,
+        n_heads=nano_cfg.n_head,
+        d_vocab=nano_cfg.vocab_size,
+        act_fn="gelu",
+        normalization_type="LN",
+        device=device,
+    )
+
+    model = HubGPT.from_pretrained(name, config=nano_cfg).to(device)
+    state_dict = convert_nanogpt_to_transformer_lens_weights(
+        model.state_dict(), nano_cfg, hooked_cfg
+    )
+
+    model = HookedTransformer(hooked_cfg)
+    model.load_and_process_state_dict(state_dict)
+
+    if eval:
+        model.eval()
+    return model
 
 
 def get_all_squares(size: int):
@@ -21,15 +139,29 @@ def get_all_squares(size: int):
     return all_squares
 
 
+def vocab_to_board(vocab: Float[t.Tensor, "... n_ctx"], size: int = 0, fill_value = None):
+    if size == 0:
+        size = int((vocab.shape[-1] + 4) ** 0.5)
+    board_shape = (*vocab.shape[:-1], size, size)
+
+    if fill_value is None:
+        board = t.empty(board_shape)
+    else:
+        board = t.full(board_shape, fill_value)
+    board = board.to(vocab.device)
+
+    all_squares = get_all_squares(size)
+    board.flatten(-2)[..., all_squares] = vocab.clone()
+
+    return board
+
+
 def get_id_to_token_id_map(size: int, pad_token: int | None = None):
     all_squares = get_all_squares(size)
     if pad_token is not None:
         all_squares = [pad_token] + all_squares
     id_to_token_id_map = bidict(
-        {
-            square_id: token_id
-            for token_id, square_id in enumerate(all_squares)
-        }
+        {square_id: token_id for token_id, square_id in enumerate(all_squares)}
     )
     return id_to_token_id_map
 
@@ -37,7 +169,9 @@ def get_id_to_token_id_map(size: int, pad_token: int | None = None):
 def tokenize(history, size, pad_token=PAD_TOKEN):
     if isinstance(history[0], list):
         # TODO vectorise/parallelise
-        return {"input_ids": [tokenize(h, size, pad_token)["input_ids"] for h in history]}
+        return {
+            "input_ids": [tokenize(h, size, pad_token)["input_ids"] for h in history]
+        }
     id_to_token_id_map = get_id_to_token_id_map(size, pad_token)
     return {"input_ids": [id_to_token_id_map[i] for i in history]}
 
