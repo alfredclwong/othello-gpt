@@ -69,19 +69,19 @@ def theirs_empty_mine_target(batch, device) -> Float[t.Tensor, "batch pos n_out"
     return boards.flatten(2)
 
 
-def prev_tem_target(batch, device) -> Float[t.Tensor, "batch pos n_out"]:
+def prev_tem_target(batch, device, n_shift=1) -> Float[t.Tensor, "batch pos n_out"]:
     tem = theirs_empty_mine_target(batch, device)
 
     n_batch = tem.shape[0]
     size = int((tem.shape[-1] + 4) ** 0.5)
 
-    initial_board = t.zeros((n_batch, 1, size, size), device=device)
+    initial_board = t.zeros((n_batch, n_shift, size, size), device=device)
     i = size // 2 - 1
-    initial_board[..., [i, i + 1], [i, i + 1]] = -1
-    initial_board[..., [i, i + 1], [i + 1, i]] = 1
-    initial_board = initial_board.flatten(2)
+    initial_board[:, -1, [i, i + 1], [i, i + 1]] = -1
+    initial_board[:, -1, [i, i + 1], [i + 1, i]] = 1
+    initial_board = initial_board.flatten(2) + 1
 
-    return t.cat([initial_board + 1, tem[:, :-1]], dim=1).int()
+    return t.cat([initial_board, tem[:, :-n_shift]], dim=1).int()
 
 
 def legality_target(batch, device):

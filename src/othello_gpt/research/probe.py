@@ -74,10 +74,12 @@ linear_probe_tem = t.stack([ps[k] for k in "tem"], dim=-2)
 linear_probe_cap = t.stack([-ps["c"], ps["c"]], dim=-2)
 linear_probe_legal = t.stack([-ps["l"], ps["l"]], dim=-2)
 linear_probe_ptem = t.stack([ps["p" + k] for k in "tem"], dim=-2)
+linear_probe_pptem = t.stack([ps["pp" + k] for k in "tem"], dim=-2)
 linear_probe_dir = t.stack([ps["d"], -ps["d"]], dim=-2)
 linear_probe_unembed = t.stack([-ps["u"], ps["u"]], dim=-2)
 
 # %%
+pptem_target = lambda x, device: prev_tem_target(x, device, n_shift=2)
 probe_targets = [
     ("unembed (legal)", linear_probe_unembed, legality_target),
     ("unembed (next move)", linear_probe_unembed, next_move_target),
@@ -86,6 +88,7 @@ probe_targets = [
     ("legal (legal)", linear_probe_legal, legality_target),
     ("legal (next move)", linear_probe_legal, next_move_target),
     ("ptem", linear_probe_ptem, prev_tem_target),
+    ("pptem", linear_probe_pptem, pptem_target),
     ("dir", linear_probe_dir, flip_dir_target),
 ]
 
@@ -234,16 +237,16 @@ fig_accs.show()
 # %%
 batch = dataset_dict["test"].take(1)
 plot_game(batch[0])
-probe_layer = 50
 preds = [
-    (linear_probe_unembed, legality_target, "Unembed 'probe'"),
-    (linear_probe_legal, legality_target, "Legal probe"),
-    (linear_probe_tem, theirs_empty_mine_target, "TEM probe"),
-    (linear_probe_ptem, prev_tem_target, "PTEM probe"),
-    (linear_probe_cap, captures_target, "Captures probe"),
-    (linear_probe_dir, flip_dir_target, "Directions probe"),
+    (linear_probe_unembed, legality_target, "Unembed 'probe'", 60),  # TODO test_loss.argmax()
+    (linear_probe_legal, legality_target, "Legal probe", 60),
+    (linear_probe_tem, theirs_empty_mine_target, "TEM probe", 51),
+    (linear_probe_ptem, prev_tem_target, "PTEM probe", 51),
+    (linear_probe_pptem, pptem_target, "PPTEM probe", 51),
+    (linear_probe_cap, captures_target, "Captures probe", 50),
+    (linear_probe_dir, flip_dir_target, "Directions probe", 34),
 ]
-for probe, target_fn, title in preds:
+for probe, target_fn, title, probe_layer in preds:
     plot_probe_preds(
         model,
         device,
@@ -334,16 +337,18 @@ fig.show()
 
 # %%
 # Visualise orthogonality between feature probes for different squares
-all_probes = [
+board_probes = [
     linear_probe_tem,
+    linear_probe_ptem,
+    linear_probe_pptem,
     linear_probe_cap,
     linear_probe_legal,
 ]
-all_probes = t.cat([p[:, :, :, 1:-1] for p in all_probes], dim=-2)
-all_probes /= all_probes.norm(dim=0, keepdim=True)
+board_probes = t.cat([p[:, :, :, 1:-1] for p in board_probes], dim=-2)
+board_probes /= board_probes.norm(dim=0, keepdim=True)
 positional_dots = einops.einsum(
-    all_probes[:, : all_probes.shape[1] // 2],
-    all_probes,
+    board_probes[:, : board_probes.shape[1] // 2],
+    board_probes,
     "d_model rc0 n_probe n_layer, d_model rc1 n_probe n_layer -> rc0 rc1 n_probe n_layer",
 )
 # positional_dots[*(range(size) for _ in range(4))] = 0
@@ -351,7 +356,7 @@ positional_dots = einops.reduce(
     positional_dots, "rc0 rc1 n_probe n_layer -> (rc0 n_probe) rc1", "mean"
 ).cpu()
 positional_dots = einops.rearrange(positional_dots, "n (r c) -> n r c", r=size)
-positional_names = ["t", "e", "m", "c", "nc", "l", "nl"]
+positional_names = ["t", "e", "m", "pt", "pe", "pm", "ppt", "ppe", "ppm", "c", "nc", "l", "nl"]
 plot_game(
     {"boards": positional_dots},
     hovertext=positional_dots,

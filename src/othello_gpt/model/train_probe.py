@@ -129,17 +129,18 @@ test_args = LinearProbeTrainingArgs(
 )
 
 runs = [
-    ("tem", theirs_empty_mine_target, default_args),
-    ("legal", legality_target, default_args),
-    ("ptem", prev_tem_target, default_args),
-    ("cap", captures_target, default_args),
-    ("dir", flip_dir_target, default_args),
+    # ("tem", theirs_empty_mine_target, default_args),
+    # ("legal", legality_target, default_args),
+    # ("ptem", prev_tem_target, default_args),
+    # ("cap", captures_target, default_args),
+    # ("dir", flip_dir_target, default_args),
+    ("pptem", lambda x, device: prev_tem_target(x, device, n_shift=2), default_args)
 ]
 
 for name, fn, args in runs:
     ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     save_path = probe_dir / f"probe_{name}_{ts}.pt"
-    args = test_args
+    # args = test_args
     linear_probe = train_linear_probe(model, args, lambda x: fn(x, device))
     t.save(
         linear_probe,

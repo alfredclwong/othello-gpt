@@ -60,6 +60,7 @@ def load_probes(probe_dir: Path, device, w_u=None, w_e=None, normed=True, combos
         (None, "c"): "probe_cap_20250221_025002.pt",
         (None, "l"): "probe_legal_20250221_014256.pt",
         ("pt", "pe", "pm"): "probe_ptem_20250221_021621.pt",
+        ("ppt", "ppe", "ppm"): "probe_pptem_20250221_191411.pt",
         "d": "probe_dir_20250221_145729.pt",
     }
 
