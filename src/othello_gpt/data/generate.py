@@ -26,6 +26,7 @@ def generate_game(size: int, no_pass: bool = True) -> Dict[str, List]:
         "flips": [],
         "originals": [],
         "input_ids": [],
+        "flip_dirs": [],
     }
 
     id_to_token_id_map = get_id_to_token_id_map(size)
@@ -53,11 +54,14 @@ def generate_game(size: int, no_pass: bool = True) -> Dict[str, List]:
         cum_originals[game_dict["coords"][-1]] = state.turn
         game_dict["originals"].append(cum_originals.copy())
 
-        state, _flips = make_move(state, move_id, validate=False)
+        state, _flips, flip_dirs = make_move(state, move_id, validate=False)
         game_dict["boards"].append(state.board)
         game_dict["flips"].append(np.zeros((size, size), dtype=bool))
         for y, x in _flips:
             game_dict["flips"][-1][y, x] = 1
+        game_dict["flip_dirs"].append(np.zeros((3, 3), dtype=bool))
+        for dy, dx in flip_dirs:
+            game_dict["flip_dirs"][-1][dy + 1, dx + 1] = 1
 
     return game_dict
 
@@ -103,10 +107,11 @@ if __name__ == "__main__":
     root_dir = Path().cwd()
     hf.login((root_dir / "secret.txt").read_text())
 
-    n_games = 1000000
+    n_games = 2000000
     size = 6
 
     with tempfile.TemporaryDirectory() as tmp_dir:
+        print(f"Writing to tmp dir {tmp_dir}")
         dataset = generate_dataset(Path(tmp_dir), n_games, size)
         dataset_dict = dataset.train_test_split(test_size=0.1)
         dataset_dict.push_to_hub("awonga/othello-gpt")

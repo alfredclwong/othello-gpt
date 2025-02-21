@@ -60,10 +60,11 @@ class OthelloState:  # TODO immutable dataclass?
         return f"Turn = {self.turn}\n{histories_str}\n{self.board}"
 
 
-def get_flips(state: OthelloState, move: int) -> List[Tuple[int, int]]:
+def get_flips(state: OthelloState, move: int) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
     turn = state.turn
     size = state.size
     flips = []
+    flip_dirs = []
     directions = [
         (-1, -1),  # NW
         (-1, 0),  # N
@@ -86,12 +87,14 @@ def get_flips(state: OthelloState, move: int) -> List[Tuple[int, int]]:
             x += dx
         if 0 <= y < size and 0 <= x < size and state.board[y, x] == turn:
             flips.extend(flip)
-    return flips
+            if flip:
+                flip_dirs.append(direction)
+    return flips, flip_dirs
 
 
 def make_move(
     state: OthelloState, move: int, validate: bool = True
-) -> Tuple[OthelloState, List[Tuple[int, int]]]:
+) -> Tuple[OthelloState, List[Tuple[int, int]], List[int]]:
     board = state.board.copy()
 
     history = state.history.copy()
@@ -102,7 +105,7 @@ def make_move(
     if move == state.size * state.size:
         return OthelloState(board=board, history=history, turn=turn)
 
-    flips = get_flips(state, move)
+    flips, flip_dirs = get_flips(state, move)
     if validate and (
         len(flips) == 0 or state.board[move // state.size, move % state.size] != 0
     ):
@@ -112,7 +115,7 @@ def make_move(
     for y, x in flips:
         board[y, x] = state.turn
 
-    return OthelloState(board=board, history=history, turn=turn), flips
+    return OthelloState(board=board, history=history, turn=turn), flips, flip_dirs
 
 
 def get_legal_move_ids(state: OthelloState, no_pass: bool = True) -> List[int]:
@@ -120,7 +123,7 @@ def get_legal_move_ids(state: OthelloState, no_pass: bool = True) -> List[int]:
     for move in range(state.size * state.size):
         if (
             state.board[move // state.size, move % state.size] == 0
-            and len(get_flips(state, move)) > 0
+            and len(get_flips(state, move)[0]) > 0
         ):
             legal_moves.append(move)
     if not legal_moves and not no_pass:

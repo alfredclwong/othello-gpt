@@ -16,11 +16,11 @@ PAD_TOKEN = -1
 
 def load_probes(probe_dir: Path, device, w_u=None, w_e=None, normed=True, combos=[]):
     probe_names = {
-        "tem": "linear_probe_20250220_011503_tem_7M.pt",
-        (None, "c"): "linear_probe_20250220_004630_cap_7M.pt",
-        (None, "l"): "linear_probe_20250220_002442_legal_7M.pt",
-        # ("tc", "nc", "mc"): "linear_probe_20250220_144128_tem_caps_7M.pt",
-        ("pt", "pe", "pm"): "linear_probe_20250220_162609_ptem_7M.pt",
+        "tem": "probe_tem_20250221_012810.pt",
+        (None, "c"): "probe_cap_20250221_025002.pt",
+        (None, "l"): "probe_legal_20250221_014256.pt",
+        ("pt", "pe", "pm"): "probe_ptem_20250221_021621.pt",
+        "d": "probe_dir_20250221_145729.pt",
     }
 
     probes = {}
@@ -28,26 +28,25 @@ def load_probes(probe_dir: Path, device, w_u=None, w_e=None, normed=True, combos
         probe = t.load(
             probe_dir / file, weights_only=True, map_location=device
         ).detach()
+
         for i, n in enumerate(names):
             if n is None:
                 continue
             probes[n] = probe[..., i, :]
 
     n_probe_layers = probes["t"].shape[-1]
-
     if w_u is not None:
         probes["u"] = einops.repeat(
             vocab_to_board(w_u),
             "d_model row col -> d_model row col n",
             n=n_probe_layers,
-        )
-
+        ).flatten(1, 2)
     if w_e is not None:
         probes["b"] = einops.repeat(
             vocab_to_board(w_e),
             "d_model row col -> d_model row col n",
             n=n_probe_layers,
-        )
+        ).flatten(1, 2)
 
     if normed:
         for k in probes:
@@ -55,9 +54,22 @@ def load_probes(probe_dir: Path, device, w_u=None, w_e=None, normed=True, combos
             norm = norm.nan_to_num(1)
             probes[k] = probes[k] / norm
 
-    for combo in combos:
-        probes[combo] = probes[combo[0]].clone()
-        for s, k in zip(combo[1::2], combo[2::2]):
+    for i in range(len(combos)):
+        combo = combos[i]
+        if combo[0] not in "+-":
+            combo = "+" + combo
+
+        signs = []
+        components = []
+        for c in combo:
+            if c in "+-":
+                signs.append(c)
+                components.append("")
+            else:
+                components[-1] += c
+
+        probes[combo] = t.zeros_like(probes[components[0]])
+        for s, k in zip(signs, components):
             if s == "+":
                 probes[combo] += probes[k].clone()
             elif s == "-":
@@ -139,7 +151,7 @@ def get_all_squares(size: int):
     return all_squares
 
 
-def vocab_to_board(vocab: Float[t.Tensor, "... n_ctx"], size: int = 0, fill_value = None):
+def vocab_to_board(vocab: Float[t.Tensor, "... n_ctx"], size: int = 0, fill_value=None):
     if size == 0:
         size = int((vocab.shape[-1] + 4) ** 0.5)
     board_shape = (*vocab.shape[:-1], size, size)

@@ -1,5 +1,6 @@
 # %%
 import datetime as dt
+import itertools
 from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
@@ -13,22 +14,20 @@ import plotly.graph_objects as go
 import torch as t
 import wandb
 from datasets import load_dataset
+from jaxtyping import Float
+from plotly.subplots import make_subplots
 from tqdm import tqdm
 from transformer_lens import HookedTransformer
-from jaxtyping import Float
 
 from othello_gpt.data.vis import plot_game, plot_probe_preds
 from othello_gpt.research.targets import (
     captures_target,
+    flip_dir_target,
     forward_probe,
     legality_target,
-    # original_colour_target,
-    theirs_empty_mine_target,
-    # flip_parity_target,
-    # mine_flip_target,
-    # omine_flip_target,
+    next_move_target,
     prev_tem_target,
-    tem_captures_target,
+    theirs_empty_mine_target,
 )
 from othello_gpt.util import get_all_squares, load_model, load_probes
 
@@ -53,22 +52,12 @@ device = t.device(
     else "cpu"
 )
 
-
 # %%
 model = load_model(device, "awonga/othello-gpt-7M")
 
+
 # %%
-## TRAIN LINEAR PROBES
-# A linear probe maps residual vectors (n_batch, d_model) to e.g. board representations (n_batch, size, size)
-# This helps us to discover interpretable directions in activation space
-
-# Key concepts:
-#  - training linear probes
-#  - causal interventions
-#  -
-
-
-@dataclass
+@dataclass(frozen=True)
 class LinearProbeTrainingArgs:
     n_epochs: int = 6
     lr: float = 1e-3
@@ -83,16 +72,24 @@ class LinearProbeTrainingArgs:
     warmup_steps: int = 100
 
 
-def test_linear_probe(test_dataset, test_y, linear_probe, target_fn):
-    with t.inference_mode():
-        test_y_pred, test_loss = forward_probe(
-            model, device, linear_probe, test_dataset, target_fn
-        )
-    test_accs = (test_y_pred > np.log(0.5)).argmax(-1) == test_y  # TODO check
-    test_accs = einops.reduce(
-        test_accs.float(), "layer batch pos row col -> layer", "mean"
+@t.inference_mode()
+def test_linear_probe(
+    test_dataset,
+    test_y,
+    linear_probe,
+    target_fn,
+    scalar_loss=True,
+):
+    test_y_logprobs, test_loss = forward_probe(
+        model,
+        device,
+        linear_probe,
+        test_dataset,
+        target_fn,
+        scalar_loss=scalar_loss,
     )
-    test_accs = test_accs.cpu()  # .round(decimals=4)
+    test_accs = test_y_logprobs.argmax(-1) == test_y  # TODO check
+    test_accs = test_accs.cpu()
     return test_loss, test_accs
 
 
@@ -102,12 +99,13 @@ def train_linear_probe(
     target_fn: Callable,
 ):
     test_dataset = dataset_dict["test"].take(args.n_test)
-    test_y: Float[t.Tensor, "n_test pos row col"] = target_fn(test_dataset).to(device)
+    test_y: Float[t.Tensor, "n_test pos n_out"] = target_fn(test_dataset)
+    test_y = test_y.to(device)
     d_probe = test_y.max().item() + 1
     n_probes = model.cfg.n_layers * 2 + 1
 
     linear_probe = t.randn(
-        (model.cfg.d_model, size, size, d_probe, n_probes)
+        (model.cfg.d_model, test_y.shape[-1], d_probe, n_probes)
     ) / np.sqrt(model.cfg.d_model)
     linear_probe = linear_probe.to(device)
     linear_probe.requires_grad = True
@@ -117,14 +115,12 @@ def train_linear_probe(
         test_dataset, test_y, linear_probe, target_fn
     )
 
+    train_dataset = dataset_dict["train"]
     batch_indices = t.randint(
         0,
-        len(dataset_dict["train"]),
+        len(train_dataset),
         (args.n_epochs, args.n_steps_per_epoch, args.batch_size),
     )
-
-    cols = ["input_ids", "boards", "coords", "legalities", "flips", "originals"]
-    train_dataset = dataset_dict["train"].select_columns(cols)
 
     optimizer = t.optim.AdamW(
         [linear_probe], lr=args.lr, betas=args.betas, weight_decay=args.weight_decay
@@ -158,11 +154,7 @@ def train_linear_probe(
         )
 
         if args.use_wandb:
-            wandb.log({"eval_loss": test_loss}, step=step)
-            wandb.log(
-                {f"eval_acc_{i}": test_accs[i].item() for i in range(n_probes)},
-                step=step,
-            )
+            wandb.log({"eval_loss": test_loss, "eval_acc": test_accs.mean()}, step=step)
 
     if args.use_wandb:
         wandb.finish()
@@ -171,173 +163,252 @@ def train_linear_probe(
 
     return linear_probe
 
-# %%
-test_dataset = dataset_dict["test"].take(10)
-captures_target(test_dataset, device).shape
 
 # %%
-args = LinearProbeTrainingArgs()
-# args = LinearProbeTrainingArgs(
-#     use_wandb=False, n_epochs=2, n_steps_per_epoch=10, lr=1e-3
-# )
+default_args = LinearProbeTrainingArgs()
+test_args = LinearProbeTrainingArgs(
+    use_wandb=False, n_epochs=2, n_steps_per_epoch=10, lr=1e-2
+)
 
-target_fn = lambda x: prev_tem_target(x, device)
-# linear_probe = train_linear_probe(model, args, target_fn)
-# t.save(
-#     linear_probe,
-#     probe_dir / f"linear_probe_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_ptem_7M.pt",
-# )
+runs = [
+    # ("tem", theirs_empty_mine_target, default_args),
+    # ("legal", legality_target, default_args),
+    # ("ptem", prev_tem_target, default_args),
+    # ("cap", captures_target, default_args),
+    # ("dir", flip_dir_target, default_args),
+]
 
-# tem_7M accs
-# tensor([0.3304, 0.7273, 0.8151, 0.8190, 0.8202, 0.8249, 0.8255, 0.8402, 0.8406,
-#         0.8447, 0.8451, 0.8489, 0.8489, 0.8679, 0.8683, 0.8728, 0.8725, 0.8945,
-#         0.8947, 0.8988, 0.8988, 0.9013, 0.9014, 0.9032, 0.9030, 0.9117, 0.9120,
-#         0.9190, 0.9198, 0.9288, 0.9297, 0.9317, 0.9322, 0.9367, 0.9371, 0.9420,
-#         0.9421, 0.9522, 0.9519, 0.9559, 0.9563, 0.9639, 0.9643, 0.9688, 0.9691,
-#         0.9718, 0.9719, 0.9749, 0.9748, 0.9775, 0.9775, 0.9809, 0.9803, 0.9810,
-#         0.9778, 0.9776, 0.9752, 0.9747, 0.9745, 0.9745, 0.9743])
-
-# tensor([0.3609, 0.7463, 0.8087, 0.8233, 0.8249, 0.8299, 0.8299, 0.8380, 0.8375,
-#         0.8415, 0.8412, 0.8470, 0.8471, 0.8539, 0.8536, 0.8610, 0.8604, 0.8854,
-#         0.8850, 0.8916, 0.8920, 0.8958, 0.8963, 0.9008, 0.9012, 0.9106, 0.9112,
-#         0.9135, 0.9142, 0.9205, 0.9214, 0.9299, 0.9301, 0.9368, 0.9375, 0.9438,
-#         0.9434, 0.9498, 0.9496, 0.9556, 0.9555, 0.9591, 0.9590, 0.9622, 0.9619,
-#         0.9669, 0.9674, 0.9732, 0.9732, 0.9785, 0.9785, 0.9811, 0.9802, 0.9812,
-#         0.9791, 0.9794, 0.9761, 0.9755, 0.9750, 0.9746, 0.9744])
-
-# cap_7M accs
-# tensor([0.7442, 0.8991, 0.9620, 0.9623, 0.9635, 0.9636, 0.9642, 0.9643, 0.9648,
-#         0.9648, 0.9654, 0.9653, 0.9660, 0.9670, 0.9676, 0.9673, 0.9674, 0.9692,
-#         0.9694, 0.9699, 0.9707, 0.9711, 0.9713, 0.9718, 0.9726, 0.9729, 0.9736,
-#         0.9736, 0.9747, 0.9754, 0.9757, 0.9757, 0.9774, 0.9773, 0.9784, 0.9783,
-#         0.9793, 0.9795, 0.9803, 0.9806, 0.9818, 0.9824, 0.9839, 0.9843, 0.9857,
-#         0.9858, 0.9868, 0.9867, 0.9874, 0.9871, 0.9875, 0.9851, 0.9853, 0.9784,
-#         0.9772, 0.9777, 0.9766, 0.9765, 0.9764, 0.9767, 0.9766])
-
-# tensor([0.7456, 0.9496, 0.9603, 0.9614, 0.9629, 0.9627, 0.9636, 0.9635, 0.9637,
-#         0.9636, 0.9642, 0.9643, 0.9653, 0.9658, 0.9663, 0.9664, 0.9671, 0.9687,
-#         0.9691, 0.9698, 0.9703, 0.9708, 0.9710, 0.9708, 0.9719, 0.9725, 0.9733,
-#         0.9733, 0.9739, 0.9745, 0.9751, 0.9755, 0.9764, 0.9763, 0.9768, 0.9781,
-#         0.9791, 0.9792, 0.9806, 0.9813, 0.9824, 0.9830, 0.9836, 0.9841, 0.9852,
-#         0.9853, 0.9861, 0.9864, 0.9875, 0.9870, 0.9878, 0.9833, 0.9843, 0.9827,
-#         0.9819, 0.9798, 0.9789, 0.9781, 0.9786, 0.9781, 0.9790])
-
-# legal_7M accs
-# tensor([0.7110, 0.8477, 0.8864, 0.8873, 0.8881, 0.8895, 0.8895, 0.8952, 0.8953,
-#         0.8970, 0.8971, 0.8981, 0.8982, 0.9044, 0.9046, 0.9052, 0.9052, 0.9115,
-#         0.9120, 0.9141, 0.9143, 0.9152, 0.9152, 0.9159, 0.9164, 0.9224, 0.9228,
-#         0.9268, 0.9271, 0.9323, 0.9329, 0.9334, 0.9338, 0.9358, 0.9364, 0.9393,
-#         0.9395, 0.9435, 0.9439, 0.9473, 0.9482, 0.9521, 0.9540, 0.9558, 0.9577,
-#         0.9587, 0.9611, 0.9619, 0.9666, 0.9672, 0.9738, 0.9754, 0.9875, 0.9880,
-#         0.9961, 0.9961, 0.9967, 0.9967, 0.9966, 0.9966, 0.9962])
-
-# tem_caps
-# tensor([0.0411, 0.8573, 0.9569, 0.9577, 0.9624, 0.9627, 0.9629, 0.9632, 0.9635,
-#         0.9639, 0.9637, 0.9643, 0.9654, 0.9656, 0.9662, 0.9662, 0.9672, 0.9688,
-#         0.9690, 0.9692, 0.9701, 0.9700, 0.9707, 0.9708, 0.9713, 0.9723, 0.9734,
-#         0.9733, 0.9740, 0.9744, 0.9750, 0.9754, 0.9761, 0.9765, 0.9769, 0.9777,
-#         0.9790, 0.9794, 0.9806, 0.9812, 0.9824, 0.9830, 0.9837, 0.9841, 0.9850,
-#         0.9851, 0.9862, 0.9865, 0.9870, 0.9870, 0.9878, 0.9833, 0.9844, 0.9828,
-#         0.9823, 0.9795, 0.9780, 0.9784, 0.9782, 0.9784, 0.9785])
-
-# tensor([0.0648, 0.8639, 0.9533, 0.9549, 0.9604, 0.9607, 0.9611, 0.9614, 0.9614,
-#         0.9612, 0.9621, 0.9625, 0.9632, 0.9635, 0.9643, 0.9644, 0.9653, 0.9663,
-#         0.9665, 0.9671, 0.9677, 0.9676, 0.9684, 0.9684, 0.9694, 0.9696, 0.9707,
-#         0.9710, 0.9719, 0.9719, 0.9725, 0.9731, 0.9742, 0.9742, 0.9747, 0.9762,
-#         0.9773, 0.9777, 0.9785, 0.9795, 0.9805, 0.9812, 0.9820, 0.9828, 0.9835,
-#         0.9837, 0.9848, 0.9849, 0.9858, 0.9855, 0.9863, 0.9811, 0.9820, 0.9805,
-#         0.9782, 0.9759, 0.9746, 0.9739, 0.9740, 0.9742, 0.9746])
-
-# ptem_7M
-# tensor([0.3346, 0.6783, 0.7305, 0.7584, 0.7647, 0.7717, 0.7743, 0.7871, 0.7893,
-#         0.7958, 0.7972, 0.8082, 0.8102, 0.8204, 0.8217, 0.8303, 0.8306, 0.8640,
-#         0.8644, 0.8731, 0.8727, 0.8786, 0.8787, 0.8828, 0.8828, 0.8948, 0.8945,
-#         0.8984, 0.8977, 0.9056, 0.9047, 0.9160, 0.9150, 0.9226, 0.9215, 0.9318,
-#         0.9303, 0.9403, 0.9384, 0.9480, 0.9464, 0.9523, 0.9502, 0.9556, 0.9529,
-#         0.9595, 0.9574, 0.9658, 0.9637, 0.9708, 0.9688, 0.9732, 0.9685, 0.9702,
-#         0.9659, 0.9668, 0.9610, 0.9598, 0.9589, 0.9583, 0.9581])
+for name, fn, args in runs:
+    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = probe_dir / f"probe_{name}_{ts}.pt"
+    # args = test_args
+    linear_probe = train_linear_probe(model, args, lambda x: fn(x, device))
+    t.save(
+        linear_probe,
+        save_path,
+    )
+    del linear_probe
 
 # %%
 probes = load_probes(
-    probe_dir, device, w_u=model.W_U.detach(), w_e=model.W_E.T.detach(), combos=["t+m", "t-m", "t-e"]
+    probe_dir,
+    device,
+    w_u=model.W_U.detach(),
+    w_e=model.W_E.T.detach(),
+    combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
+    normed=False,
+)
+probes_normed = load_probes(
+    probe_dir,
+    device,
+    w_u=model.W_U.detach(),
+    w_e=model.W_E.T.detach(),
 )
 {k: p.shape for k, p in probes.items()}  # d_model row col n_probe_layer
 
 # %%
-linear_probe_tem = t.stack([probes[k] for k in "tem"], dim=-2)
-linear_probe_cap = t.stack([-probes["c"], probes["c"]], dim=-2)
-linear_probe_legal = t.stack([-probes["l"], probes["l"]], dim=-2)
-# linear_probe_tem_caps = t.stack([probes[k+"c"] for k in "tnm"], dim=-2)
-linear_probe_ptem = t.stack([probes["p"+k] for k in "tem"], dim=-2)
+ps = probes_normed
+
+linear_probe_tem = t.stack([ps[k] for k in "tem"], dim=-2)
+linear_probe_cap = t.stack([-ps["c"], ps["c"]], dim=-2)
+linear_probe_legal = t.stack([-ps["l"], ps["l"]], dim=-2)
+linear_probe_ptem = t.stack([ps["p" + k] for k in "tem"], dim=-2)
+linear_probe_dir = t.stack([ps["d"], -ps["d"]], dim=-2)
+linear_probe_unembed = t.stack([-ps["u"], ps["u"]], dim=-2)
+
+# %%
+probe_targets = [
+    ("unembed (legal)", linear_probe_unembed, legality_target),
+    ("unembed (next move)", linear_probe_unembed, next_move_target),
+    ("tem", linear_probe_tem, theirs_empty_mine_target),
+    ("cap", linear_probe_cap, captures_target),
+    ("legal (legal)", linear_probe_legal, legality_target),
+    ("legal (next move)", linear_probe_legal, next_move_target),
+    ("ptem", linear_probe_ptem, prev_tem_target),
+    ("dir", linear_probe_dir, flip_dir_target),
+]
+
+test_dataset = dataset_dict["test"].take(1000)
+
+probe_accuracies = {}
+probe_losses = {}
+for name, probe, target_fn in tqdm(probe_targets):
+    test_y: Float[t.Tensor, "n_test pos n_out"] = target_fn(test_dataset, device)
+    test_loss, test_accs = test_linear_probe(
+        test_dataset,
+        test_y,
+        probe,
+        target_fn=lambda x: target_fn(x, device),
+        scalar_loss=False,
+    )
+
+    test_loss = einops.reduce(test_loss, "layer batch pos n_out -> layer n_out", "mean")
+    test_accs = einops.reduce(
+        test_accs.float(), "layer batch pos n_out -> layer n_out", "mean"
+    )
+
+    probe_accuracies[name] = test_accs
+    probe_losses[name] = test_loss.detach().cpu()
+
+# %%
+colours = [
+    "#FF0000",
+    "#00FF00",
+    "#0000FF",
+    "#FFFF00",
+    "#FF00FF",
+    "#00FFFF",
+    "#800000",
+    "#008000",
+    "#000080",
+    "#808000",
+    "#800080",
+    "#008080",
+    "#FF8080",
+    "#80FF80",
+    "#8080FF",
+    "#FFFF80",
+    "#FF80FF",
+    "#80FFFF",
+    "#C0C0C0",
+    "#404040",
+]
+cmap = {
+    name: colour for name, colour in zip(probe_accuracies, itertools.cycle(colours))
+}
+
+fig_loss_layer = make_subplots(
+    rows=1, cols=2, subplot_titles=("Test Loss", "Test Accuracy")
+)
+
+for name in probe_losses:
+    fig_loss_layer.add_trace(
+        go.Scatter(
+            x=list(range(probe_losses[name].shape[0])),
+            y=probe_losses[name].mean(dim=-1),
+            mode="lines",
+            name=name,
+            line=dict(color=cmap[name]),
+        ),
+        row=1,
+        col=1,
+    )
+    fig_loss_layer.add_trace(
+        go.Scatter(
+            x=list(range(probe_accuracies[name].shape[0])),
+            y=probe_accuracies[name].mean(dim=-1),
+            mode="lines",
+            name=name,
+            line=dict(color=cmap[name]),
+            showlegend=False,
+        ),
+        row=1,
+        col=2,
+    )
+
+fig_loss_layer.update_layout(
+    height=600, width=1200, title_text="Test Loss and Accuracy Across Layers"
+)
+fig_loss_layer.show()
+
+# %%
+fig_loss = make_subplots(rows=size, cols=size, y_title="loss", x_title="layer")
+fig_accs = make_subplots(rows=size, cols=size, y_title="acc", x_title="layer")
+
+for y in range(size):
+    for x in range(size):
+        showlegend = y == 0 and x == 0
+        for name in probe_losses:
+            if name == "dir":
+                continue
+            middle_indices = [size // 2 - 1, size // 2]
+            if name == "unembed" and y in middle_indices and x in middle_indices:
+                continue
+            fig_loss.add_trace(
+                go.Scatter(
+                    y=probe_losses[name][:, y * size + x],
+                    mode="lines",
+                    name=name,
+                    line=dict(color=cmap[name]),
+                    showlegend=showlegend,
+                ),
+                row=y + 1,
+                col=x + 1,
+            )
+            fig_accs.add_trace(
+                go.Scatter(
+                    y=probe_accuracies[name][:, y * size + x],
+                    mode="lines",
+                    name=name,
+                    line=dict(color=cmap[name]),
+                    showlegend=showlegend,
+                ),
+                row=y + 1,
+                col=x + 1,
+            )
+fig_size = 1200
+fig_loss.update_layout(
+    height=fig_size, width=fig_size, title_text="Test Loss for Each Square"
+)
+fig_accs.update_layout(
+    height=fig_size, width=fig_size, title_text="Test Accuracy for Each Square"
+)
+fig_accs.update_yaxes(range=[0.5, 1], row="all", col="all")
+
+fig_loss.show()
+fig_accs.show()
+
+# Why is loss lower and acc higher for legal vs unembed on same legality target?
+# Legal probe minimises cross-entropy for whether a specific square is legal, given a residual vector
+# Unembed (transformer) mininmises cross-entropy over the next token
 
 # %%
 batch = dataset_dict["test"].take(1)
 plot_game(batch[0])
-probe_layer = 54
-plot_probe_preds(
-    model,
-    device,
-    linear_probe_legal,
-    batch,
-    target_fn=lambda x: legality_target(x, device),
-    layer=probe_layer,
-    index=0,
-    title="Legal probe",
-)
-plot_probe_preds(
-    model,
-    device,
-    linear_probe_tem,
-    batch,
-    target_fn=lambda x: theirs_empty_mine_target(x, device),
-    layer=probe_layer,
-    index=0,
-    title="TEM probe",
-)
-plot_probe_preds(
-    model,
-    device,
-    linear_probe_ptem,
-    batch,
-    target_fn=lambda x: prev_tem_target(x, device),
-    layer=probe_layer,
-    index=0,
-    title="PTEM probe",
-)
-plot_probe_preds(
-    model,
-    device,
-    linear_probe_cap,
-    batch,
-    target_fn=lambda x: captures_target(x, device),
-    layer=probe_layer,
-    index=0,
-    title="Captures probe",
-)
+probe_layer = 50
+preds = [
+    (linear_probe_unembed, legality_target, "Unembed 'probe'"),
+    (linear_probe_legal, legality_target, "Legal probe"),
+    (linear_probe_tem, theirs_empty_mine_target, "TEM probe"),
+    (linear_probe_ptem, prev_tem_target, "PTEM probe"),
+    (linear_probe_cap, captures_target, "Captures probe"),
+    (linear_probe_dir, flip_dir_target, "Directions probe"),
+]
+for probe, target_fn, title in preds:
+    plot_probe_preds(
+        model,
+        device,
+        probe,
+        batch,
+        target_fn=lambda x: target_fn(x, device),
+        layer=probe_layer,
+        index=0,
+        title=title,
+    )
 
 # %%
 # Visualise cross-orthogonality between linear probes, across layers and features
-dot_names, dot_probes = zip(*probes.items())
+dot_names, dot_probes = zip(
+    *{k: v for k, v in probes_normed.items() if k != "d"}.items()
+)
 dot_probes = t.stack(tuple(dot_probes), dim=-1)
 probe_layers = [0, 50, 60]
 dot_probes = dot_probes[..., probe_layers, :]
+print(dot_probes.shape)
 dots = einops.einsum(
     dot_probes,
     dot_probes,
-    "d_model row col layer_0 probe_0, d_model row col layer_1 probe_1 -> row col probe_0 probe_1 layer_0 layer_1",
+    "d_model n_out layer_0 probe_0, d_model n_out layer_1 probe_1 -> n_out probe_0 probe_1 layer_0 layer_1",
 )
 # probe_layers = list(range(dot_probes.shape[-2]))
 dots = einops.reduce(
     dots,
-    "row col probe_0 probe_1 layer_0 layer_1 -> (layer_0 probe_0) (layer_1 probe_1)",
-    t.nanmean
+    "n_out probe_0 probe_1 layer_0 layer_1 -> (layer_0 probe_0) (layer_1 probe_1)",
+    t.nanmean,
 )
 dots = t.tril(dots)
 
-index = [
-    f"L{l} {probe_name}"
-    for l, probe_name in product(probe_layers, dot_names)
-]
+index = [f"L{l} {probe_name}" for l, probe_name in product(probe_layers, dot_names)]
 dots_df = pd.DataFrame(dots.cpu(), index=index, columns=index)
 
 fig = go.Figure(

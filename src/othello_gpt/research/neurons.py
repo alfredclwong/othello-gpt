@@ -8,6 +8,8 @@ import plotly.graph_objects as go
 from typing import Optional
 from jaxtyping import Float
 from plotly.subplots import make_subplots
+from transformer_lens import HookedTransformer
+from typing import List, Tuple
 
 from othello_gpt.data.vis import plot_in_basis
 from scipy.stats import kurtosis
@@ -72,7 +74,8 @@ neurons = {
 labels = [f"M{l} N{n}" for l in range(n_layer) for n in range(n_neuron)]
 probe_layer = 50
 # probe_name = "t-m"
-probe_name = "l"
+probe_name = "e"
+# probe_name = "l"
 probe = probes[probe_name][..., probe_layer]
 for s in ["pos", "neg"]:
     for n, w in neurons.items():
@@ -105,9 +108,87 @@ for n in neurons:
 
 # %%
 # Show a modular neuron circuit in L0 for captures
+neuron = (18, 498)
+probe_layer = (neuron[0] + 1) * 2
+neuron_probes = {
+    "w_in": ["pt", "pe", "pm", "t", "e", "m", "c"],
+    "w_out": ["t-m"],
+}
+for n in neurons:
+    for p in neuron_probes[n]:
+        plot_in_basis(
+            neurons[n][*neuron].unsqueeze(0),
+            probes[p][..., probe_layer],
+            labels=[f"M{neuron[0]} N{neuron[1]} {n} . {p}{probe_layer}"],
+            n_cols=1,
+        )
+
+# %%
+# Show a modular neuron circuit for PT -> M
+neuron = (26, 360)
+probe_layer = (neuron[0] + 1) * 2
+neuron_probes = {
+    "w_in": ["pt"],
+    "w_out": ["m"],
+}
+for n in neurons:
+    for p in neuron_probes[n]:
+        plot_in_basis(
+            neurons[n][*neuron].unsqueeze(0),
+            probes[p][..., probe_layer],
+            labels=[f"M{neuron[0]} N{neuron[1]} {n} . {p}{probe_layer}"],
+            n_cols=1,
+        )
+
+# %%
+# Show a modular neuron circuit for PE -> E
+neuron = (22, 107)
+probe_layer = (neuron[0] + 1) * 2
+neuron_probes = {
+    "w_in": probes.keys(),
+    "w_out": probes.keys(),
+}
+for n in neurons:
+    for p in neuron_probes[n]:
+        plot_in_basis(
+            neurons[n][*neuron].unsqueeze(0),
+            probes[p][..., probe_layer],
+            labels=[f"M{neuron[0]} N{neuron[1]} {n} . {p}{probe_layer}"],
+            n_cols=1,
+        )
+
+# %%
+probes["t"].shape
+
+# %%
+def probe_neurons(
+    model: HookedTransformer,
+    neurons: List[Tuple[int, int]],
+    in_probes: Float[t.Tensor, "probe d_model row col"],
+    out_probes: Float[t.Tensor, "probe d_model row col"],
+):
+    # plot several neurons' w_in and w_out weights transformed into various probe directions
+    # TODO probe directions might not map to a board!
+    n_neurons = len(neurons)
+    ls, ns = zip(*neurons)
+
+    w_in: Float[t.Tensor, "neuron d_model"] = model.W_in[ls, :, ns]
+    w_out: Float[t.Tensor, "neuron d_model"] = model.W_out[ls, ns, :]
+
+    w_in /= w_in.norm(-1, keepdim=True)
+    w_out /= w_out.norm(-1, keepdim=True)
+
+    fig = make_subplots(rows=2, cols=n_neurons)
+
+    in_probes = t.stack()
+
+
+probe_neurons(model, [(22, 107), (0, 0)], [], [])
+
 
 # %%
 # Form (hopefully disjoint) sets of modular circuits
+
 
 # %%
 def plot_neuron_excess_kurtosis(

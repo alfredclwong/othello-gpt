@@ -40,6 +40,7 @@ def plot_game(
     shift_legalities=True,
     title="",
     subplot_titles=None,
+    annotate_moves=True,
 ):
     game_boards = np.array(game["boards"])
     n_moves, size, _ = game_boards.shape
@@ -91,7 +92,7 @@ def plot_game(
             text = np.where(game_legalities[i + int(shift_legalities)], "X", "")
         else:
             text = np.full_like(game_legalities[0], "", dtype=str)
-        if game_moves[i] != size * size:
+        if game_moves[i] != size * size and annotate_moves:
             coord = move_id_to_coord(int(game_moves[i]), size)
             text[*coord] = "o"
 
@@ -204,7 +205,7 @@ def plot_in_basis(
 def plot_probe_preds(
     model,
     device,
-    probe: Float[t.Tensor, "d_model row col d_probe n_layer"],
+    probe: Float[t.Tensor, "d_model n_out d_probe n_layer"],
     batch,
     target_fn,
     layer,
@@ -224,6 +225,20 @@ def plot_probe_preds(
     pred_prob = t.exp(pred_logprob).cpu()
     pred_prob, pred_index = pred_prob.max(dim=-1)
 
+    n_out = probe.shape[1]
+    if n_out < t.tensor(batch["moves"]).max():
+        annotate_moves = False
+    else:
+        annotate_moves = True
+
+    int_sqrt = int(n_out ** 0.5)
+    target = einops.rearrange(
+        target, "batch pos (row col) -> batch pos row col", row=int_sqrt
+    )
+    pattern = "layer batch n_ctx (row col) -> layer batch n_ctx row col"
+    pred_prob = einops.rearrange(pred_prob, pattern, row=int_sqrt)
+    pred_index = einops.rearrange(pred_index, pattern, row=int_sqrt)
+
     pred_dict = {
         "boards": pred_index[layer, index],
         "legalities": target[index] == 1,
@@ -236,4 +251,5 @@ def plot_probe_preds(
         hovertext=pred_prob[layer, index],
         shift_legalities=False,
         title=title,
+        annotate_moves=annotate_moves,
     )
