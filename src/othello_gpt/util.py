@@ -1,6 +1,7 @@
 from typing import List
 import huggingface_hub as hf
 from pathlib import Path
+from dataclasses import dataclass
 
 import einops
 import torch as t
@@ -10,8 +11,47 @@ from torch import Tensor
 from transformer_lens import HookedTransformerConfig, HookedTransformer
 
 from othello_gpt.model.nanoGPT import GPTConfig, GPT
+from othello_gpt.research.targets import forward_probe
 
 PAD_TOKEN = -1
+
+
+@dataclass(frozen=True)
+class LinearProbeTrainingArgs:
+    n_epochs: int = 6
+    lr: float = 1e-3
+    batch_size: int = 256
+    n_steps_per_epoch: int = 200
+    n_test: int = 1000
+    betas: tuple[float, float] = (0.9, 0.99)
+    weight_decay: float = 1e-3
+    use_wandb: bool = True
+    wandb_project: str | None = "othello-gpt-probe"
+    wandb_name: str | None = None
+    warmup_steps: int = 100
+
+
+@t.inference_mode()
+def test_linear_probe(
+    model,
+    device,
+    test_dataset,
+    test_y,
+    linear_probe,
+    target_fn,
+    scalar_loss=True,
+):
+    test_y_logprobs, test_loss = forward_probe(
+        model,
+        device,
+        linear_probe,
+        test_dataset,
+        target_fn,
+        scalar_loss=scalar_loss,
+    )
+    test_accs = test_y_logprobs.argmax(-1) == test_y  # TODO check
+    test_accs = test_accs.cpu()
+    return test_loss, test_accs.float()
 
 
 def load_probes(probe_dir: Path, device, w_u=None, w_e=None, normed=True, combos=[]):

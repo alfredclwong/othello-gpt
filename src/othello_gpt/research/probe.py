@@ -1,14 +1,10 @@
 # %%
-import datetime as dt
 import itertools
-from dataclasses import dataclass
 from itertools import product
 from pathlib import Path
-from typing import Callable
 
 import einops
 import huggingface_hub as hf
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import torch as t
@@ -17,19 +13,17 @@ from datasets import load_dataset
 from jaxtyping import Float
 from plotly.subplots import make_subplots
 from tqdm import tqdm
-from transformer_lens import HookedTransformer
 
 from othello_gpt.data.vis import plot_game, plot_probe_preds
 from othello_gpt.research.targets import (
     captures_target,
     flip_dir_target,
-    forward_probe,
     legality_target,
     next_move_target,
     prev_tem_target,
     theirs_empty_mine_target,
 )
-from othello_gpt.util import get_all_squares, load_model, load_probes
+from othello_gpt.util import get_all_squares, load_model, load_probes, test_linear_probe
 
 # %%
 root_dir = Path().cwd().parent.parent.parent
@@ -55,140 +49,6 @@ device = t.device(
 # %%
 model = load_model(device, "awonga/othello-gpt-7M")
 
-
-# %%
-@dataclass(frozen=True)
-class LinearProbeTrainingArgs:
-    n_epochs: int = 6
-    lr: float = 1e-3
-    batch_size: int = 256
-    n_steps_per_epoch: int = 200
-    n_test: int = 1000
-    betas: tuple[float, float] = (0.9, 0.99)
-    weight_decay: float = 1e-3
-    use_wandb: bool = True
-    wandb_project: str | None = "othello-gpt-probe"
-    wandb_name: str | None = None
-    warmup_steps: int = 100
-
-
-@t.inference_mode()
-def test_linear_probe(
-    test_dataset,
-    test_y,
-    linear_probe,
-    target_fn,
-    scalar_loss=True,
-):
-    test_y_logprobs, test_loss = forward_probe(
-        model,
-        device,
-        linear_probe,
-        test_dataset,
-        target_fn,
-        scalar_loss=scalar_loss,
-    )
-    test_accs = test_y_logprobs.argmax(-1) == test_y  # TODO check
-    test_accs = test_accs.cpu()
-    return test_loss, test_accs
-
-
-def train_linear_probe(
-    model: HookedTransformer,
-    args: LinearProbeTrainingArgs,
-    target_fn: Callable,
-):
-    test_dataset = dataset_dict["test"].take(args.n_test)
-    test_y: Float[t.Tensor, "n_test pos n_out"] = target_fn(test_dataset)
-    test_y = test_y.to(device)
-    d_probe = test_y.max().item() + 1
-    n_probes = model.cfg.n_layers * 2 + 1
-
-    linear_probe = t.randn(
-        (model.cfg.d_model, test_y.shape[-1], d_probe, n_probes)
-    ) / np.sqrt(model.cfg.d_model)
-    linear_probe = linear_probe.to(device)
-    linear_probe.requires_grad = True
-    print(f"{linear_probe.shape=}")
-
-    test_loss, test_accs = test_linear_probe(
-        test_dataset, test_y, linear_probe, target_fn
-    )
-
-    train_dataset = dataset_dict["train"]
-    batch_indices = t.randint(
-        0,
-        len(train_dataset),
-        (args.n_epochs, args.n_steps_per_epoch, args.batch_size),
-    )
-
-    optimizer = t.optim.AdamW(
-        [linear_probe], lr=args.lr, betas=args.betas, weight_decay=args.weight_decay
-    )
-
-    if args.use_wandb:
-        wandb.init(project=args.wandb_project, name=args.wandb_name, config=args)
-
-    pbar = tqdm(total=args.n_steps_per_epoch * args.n_epochs)
-    step = 0
-    for i in range(args.n_epochs):
-        for j in range(args.n_steps_per_epoch):
-            # TODO enable pin_memory
-            batch = train_dataset.select(batch_indices[i, j, :])
-            _, loss = forward_probe(model, device, linear_probe, batch, target_fn)
-
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-
-            pbar.update()
-            pbar.set_description(
-                f"Epoch {i + 1}/{args.n_epochs} {loss=:.4f} {test_accs.mean()=}"
-            )
-            if args.use_wandb and step >= args.warmup_steps:
-                wandb.log({"train_loss": loss}, step=step)
-            step += 1
-
-        test_loss, test_accs = test_linear_probe(
-            test_dataset, test_y, linear_probe, target_fn
-        )
-
-        if args.use_wandb:
-            wandb.log({"eval_loss": test_loss, "eval_acc": test_accs.mean()}, step=step)
-
-    if args.use_wandb:
-        wandb.finish()
-
-    print(test_accs)
-
-    return linear_probe
-
-
-# %%
-default_args = LinearProbeTrainingArgs()
-test_args = LinearProbeTrainingArgs(
-    use_wandb=False, n_epochs=2, n_steps_per_epoch=10, lr=1e-2
-)
-
-runs = [
-    # ("tem", theirs_empty_mine_target, default_args),
-    # ("legal", legality_target, default_args),
-    # ("ptem", prev_tem_target, default_args),
-    # ("cap", captures_target, default_args),
-    # ("dir", flip_dir_target, default_args),
-]
-
-for name, fn, args in runs:
-    ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_path = probe_dir / f"probe_{name}_{ts}.pt"
-    # args = test_args
-    linear_probe = train_linear_probe(model, args, lambda x: fn(x, device))
-    t.save(
-        linear_probe,
-        save_path,
-    )
-    del linear_probe
-
 # %%
 probes = load_probes(
     probe_dir,
@@ -203,8 +63,9 @@ probes_normed = load_probes(
     device,
     w_u=model.W_U.detach(),
     w_e=model.W_E.T.detach(),
+    combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
 )
-{k: p.shape for k, p in probes.items()}  # d_model row col n_probe_layer
+{k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
 
 # %%
 ps = probes_normed
@@ -235,6 +96,8 @@ probe_losses = {}
 for name, probe, target_fn in tqdm(probe_targets):
     test_y: Float[t.Tensor, "n_test pos n_out"] = target_fn(test_dataset, device)
     test_loss, test_accs = test_linear_probe(
+        model,
+        device,
         test_dataset,
         test_y,
         probe,
@@ -242,9 +105,11 @@ for name, probe, target_fn in tqdm(probe_targets):
         scalar_loss=False,
     )
 
-    test_loss = einops.reduce(test_loss, "layer batch pos n_out -> layer n_out", "mean")
+    test_loss = einops.reduce(
+        test_loss, "layer batch pos n_out -> layer n_out", t.nanmean
+    )
     test_accs = einops.reduce(
-        test_accs.float(), "layer batch pos n_out -> layer n_out", "mean"
+        test_accs.float(), "layer batch pos n_out -> layer n_out", t.nanmean
     )
 
     probe_accuracies[name] = test_accs
@@ -289,6 +154,7 @@ for name in probe_losses:
             mode="lines",
             name=name,
             line=dict(color=cmap[name]),
+            legendgroup=name,
         ),
         row=1,
         col=1,
@@ -301,6 +167,7 @@ for name in probe_losses:
             name=name,
             line=dict(color=cmap[name]),
             showlegend=False,
+            legendgroup=name,
         ),
         row=1,
         col=2,
@@ -322,7 +189,7 @@ for y in range(size):
             if name == "dir":
                 continue
             middle_indices = [size // 2 - 1, size // 2]
-            if name == "unembed" and y in middle_indices and x in middle_indices:
+            if "unembed" in name and y in middle_indices and x in middle_indices:
                 continue
             fig_loss.add_trace(
                 go.Scatter(
@@ -331,6 +198,7 @@ for y in range(size):
                     name=name,
                     line=dict(color=cmap[name]),
                     showlegend=showlegend,
+                    legendgroup=name,
                 ),
                 row=y + 1,
                 col=x + 1,
@@ -342,6 +210,7 @@ for y in range(size):
                     name=name,
                     line=dict(color=cmap[name]),
                     showlegend=showlegend,
+                    legendgroup=name,
                 ),
                 row=y + 1,
                 col=x + 1,
@@ -470,17 +339,18 @@ all_probes = [
     linear_probe_cap,
     linear_probe_legal,
 ]
-all_probes = t.cat([p[:, :, :, :, 1:-1] for p in all_probes], dim=-2)
+all_probes = t.cat([p[:, :, :, 1:-1] for p in all_probes], dim=-2)
 all_probes /= all_probes.norm(dim=0, keepdim=True)
 positional_dots = einops.einsum(
-    all_probes[:, : size // 2, : size // 2],
+    all_probes[:, : all_probes.shape[1] // 2],
     all_probes,
-    "d_model r0 c0 n_probe n_layer, d_model r1 c1 n_probe n_layer -> r0 c0 r1 c1 n_probe n_layer",
+    "d_model rc0 n_probe n_layer, d_model rc1 n_probe n_layer -> rc0 rc1 n_probe n_layer",
 )
 # positional_dots[*(range(size) for _ in range(4))] = 0
 positional_dots = einops.reduce(
-    positional_dots, "r0 c0 r1 c1 n_probe n_layer -> (r0 c0 n_probe) r1 c1", "mean"
+    positional_dots, "rc0 rc1 n_probe n_layer -> (rc0 n_probe) rc1", "mean"
 ).cpu()
+positional_dots = einops.rearrange(positional_dots, "n (r c) -> n r c", r=size)
 positional_names = ["t", "e", "m", "c", "nc", "l", "nl"]
 plot_game(
     {"boards": positional_dots},
@@ -489,7 +359,7 @@ plot_game(
     subplot_titles=[
         f"{chr(ord('A') + x)}{y + 1} {p}"
         for y in range(size // 2)
-        for x in range(size // 2)
+        for x in range(size)
         for p in positional_names
     ],
     shift_legalities=False,
@@ -516,3 +386,5 @@ plot_game(
 # Hypothesis: each token tracks the tiles that it captured when the move was played
 # After H0, we have [my moves; their moves; my moves flipped; their moves flipped]
 # Linear probe can then +- to get the board state
+
+# %%
