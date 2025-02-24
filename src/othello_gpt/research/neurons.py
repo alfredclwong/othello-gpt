@@ -24,7 +24,7 @@ root_dir = Path().cwd().parent.parent.parent
 data_dir = root_dir / "data"
 probe_dir = data_dir / "probes"
 
-hf.login((root_dir / "secret.txt").read_text())
+# hf.login((root_dir / "secret.txt").read_text())
 dataset_dict = load_dataset("awonga/othello-gpt")
 
 device = t.device(
@@ -47,11 +47,10 @@ probes = load_probes(
     device,
     w_u=model.W_U.detach(),
     w_e=model.W_E.T.detach(),
-    combos=["t+m", "t-m"],
+    combos=["+m-pt", "+t-pt", "+t-pm", "+m-pm", "+e-pe", "+m-pe"],
 )
-probes["r"] = t.randn_like(probes["u"])
-probes["r"] /= probes["r"].norm(dim=0, keepdim=True)
-
+# probes["r"] = t.randn_like(probes["u"])
+# probes["r"] /= probes["r"].norm(dim=0, keepdim=True)
 {k: p.shape for k, p in probes.items()}
 
 # %%
@@ -74,8 +73,8 @@ neurons = {
 labels = [f"M{l} N{n}" for l in range(n_layer) for n in range(n_neuron)]
 probe_layer = 50
 # probe_name = "t-m"
-probe_name = "e"
-# probe_name = "l"
+# probe_name = "e"
+probe_name = "+m-pe"
 probe = probes[probe_name][..., probe_layer]
 for s in ["pos", "neg"]:
     for n, w in neurons.items():
@@ -90,12 +89,15 @@ for s in ["pos", "neg"]:
         )
 
 # %%
+# TODO make fn for plotting all these together
+# TODO graph discovery
 # Show a modular neuron circuit in L1 for legality
-neuron = (29, 508)
+# neuron = (29, 508)
+neuron = (24, 513)
 probe_layer = (neuron[0] + 1) * 2
 neuron_probes = {
     "w_in": list("tem"),
-    "w_out": list("teml"),
+    "w_out": list("temlu"),
 }
 for n in neurons:
     for p in neuron_probes[n]:
@@ -108,11 +110,11 @@ for n in neurons:
 
 # %%
 # Show a modular neuron circuit in L0 for captures
-neuron = (18, 498)
+neuron = (25, 121)
 probe_layer = (neuron[0] + 1) * 2
 neuron_probes = {
     "w_in": ["pt", "pe", "pm", "t", "e", "m", "c"],
-    "w_out": ["t-m"],
+    "w_out": ["+m-pt", "+t-pt"],
 }
 for n in neurons:
     for p in neuron_probes[n]:
@@ -194,7 +196,7 @@ probe_neurons(model, [(22, 107), (0, 0)], [], [])
 def plot_neuron_excess_kurtosis(
     w_in: Float[t.Tensor, "n_layer n_neuron d_model"],
     w_out: Float[t.Tensor, "n_layer n_neuron d_model"],
-    probe: Float[t.Tensor, "d_model row col"],
+    probe: Float[t.Tensor, "d_model n_out"],
     fig: Optional[go.Figure] = None,
     row: int = 1,
     col: int = 1,
@@ -202,18 +204,18 @@ def plot_neuron_excess_kurtosis(
     w_in_probed = einops.einsum(
         w_in,
         probe,
-        "n_layer n_neuron d_model, d_model row col -> n_layer n_neuron row col",
+        "n_layer n_neuron d_model, d_model n_out -> n_layer n_neuron n_out",
     ).cpu()
     w_out_probed = einops.einsum(
         w_out,
         probe,
-        "n_layer n_neuron d_model, d_model row col -> n_layer n_neuron row col",
+        "n_layer n_neuron d_model, d_model n_out -> n_layer n_neuron n_out",
     ).cpu()
-    w_in_ekurt = kurtosis(w_in_probed, axis=(2, 3), fisher=False) - 3
-    w_out_ekurt = kurtosis(w_out_probed, axis=(2, 3), fisher=False) - 3
+    w_in_ekurt = kurtosis(w_in_probed, axis=2, fisher=False) - 3
+    w_out_ekurt = kurtosis(w_out_probed, axis=2, fisher=False) - 3
 
-    w_in_probed_flat = w_in_probed.flatten(2)
-    w_out_probed_flat = w_out_probed.flatten(2)
+    w_in_probed_flat = w_in_probed
+    w_out_probed_flat = w_out_probed
 
     w_in_sign = t.sign(
         w_in_probed_flat[
@@ -294,11 +296,6 @@ def plot_neuron_excess_kurtosis(
         showlegend=False,
     )
 
-
-# %%
-# Get stats on where each neuron activates vs probes
-
-
 # %%
 # layers = [2, 4]
 probe_layers = [6, 30, 54]
@@ -313,10 +310,16 @@ for row, layer in enumerate(probe_layers):
         plot_neuron_excess_kurtosis(
             w_in, w_out, p[..., layer], fig=fig, row=row + 1, col=col + 1
         )
-fig.update_layout(height=1600)
+fig.update_layout(height=1600, width=200*len(probes))
 fig.show()
+
+
+# %%
+# Get stats on where each neuron activates vs probes
 
 # %%
 # Conditional on A1 being strongly (un)predicted, which L1 neurons activated strongly?
 # Which post-L0 residual stream directions activated the L1 neurons?
 # How did the L0 block create these directions?
+
+# %%

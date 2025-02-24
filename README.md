@@ -33,3 +33,26 @@ Replicating the Othello GPT paper (https://arxiv.org/pdf/2210.13382) and Neel Na
     - Train probes on blocks.0.hook_resid_post (linear_probe_20250201_084310.pt)
         - When run on embedded tokens, "legal" and "empty" predict the latest move, and "mine" shows some captures as well as mines!
         - "empty" almost perfect, "mine" degrades over seq len (TODO check acc over #times flipped, also #tiles flipped when flipped)
+
+## Research summary
+
+# probe.py
+1. Break down %var explained by each probe
+2. Plot probe loss/acc vs layer, pos
+3. Plot probe predictions
+4. Plot cross-orthogonality between probes
+5. Plot orthogonality between the same probe across different board squares
+
+# neurons.py
+1. Plot top 20 W_in/W_out neurons in a probe basis, sorted by kurtosis, split by probe sign
+2. [TODO] Plot W_in/W_out for specific neurons across several probes, to visually inspect modular circuits
+3. Plot excess kurtosis for neurons in each layer for each probe
+
+# attention.py
+1. Visualise attention patterns
+2. [TODO] plot OV/QK matrices relative to probes (similarly to W_in/W_out analysis in neurons.py)
+
+# circuits.py
+1. Label neurons according to their significant probe directions
+
+# causal.py

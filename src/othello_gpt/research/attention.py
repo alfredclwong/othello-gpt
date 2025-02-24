@@ -15,6 +15,7 @@ from othello_gpt.data.vis import plot_in_basis
 from othello_gpt.util import (
     get_all_squares,
     load_model,
+    load_probes,
 )
 from othello_gpt.data.vis import move_id_to_text
 
@@ -23,7 +24,7 @@ root_dir = Path().cwd().parent.parent.parent
 data_dir = root_dir / "data"
 probe_dir = data_dir / "probes"
 
-hf.login((root_dir / "secret.txt").read_text())
+# hf.login((root_dir / "secret.txt").read_text())
 dataset_dict = load_dataset("awonga/othello-gpt")
 
 device = t.device(
@@ -105,21 +106,14 @@ vis = visualize_attention_patterns(
 HTML(vis)
 
 # %%
-probe_names = {
-    # ("ot", "oe", "om"): "linear_probe_20250217_180552_otem_256.pt",
-    # "tem": "linear_probe_20250217_173756_tem_256.pt",
-    # "f": "linear_probe_20250217_182206_flip_256.pt",
-    # "l": "linear_probe_20250217_191136_legal_256.pt",
-    "tem": "linear_probe_20250219_134957_tem.pt",
-    "c": "linear_probe_20250219_151505_cap.pt",
-}
-probes = {}
-for names, file in probe_names.items():
-    probe = t.load(probe_dir / file, weights_only=True, map_location=device).detach()
-    probe /= probe.norm(dim=0, keepdim=True)
-    for i, n in enumerate(names):
-        probes[n] = probe[..., i, :]
-{k: p.shape for k, p in probes.items()}
+probes = load_probes(
+    probe_dir,
+    device,
+    w_u=model.W_U.detach(),
+    w_e=model.W_E.T.detach(),
+    combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
+)
+{k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
 
 # %%
 (
@@ -128,56 +122,6 @@ for names, file in probe_names.items():
     model.W_V.shape,
     model.W_O.shape,
 )  # n_layer n_head d_model d_head
-
-# %%
-# plot_game(test_game)
-test_flips = t.tensor(test_game["flips"], dtype=int)
-test_coords = t.tensor(test_game["coords"])
-flip_attn = t.zeros((test_coords.shape[0], test_coords.shape[0]), dtype=int)
-labels = [f"{square} ({i})" for i, square in enumerate(test_game["squares"])]
-
-for i in range(test_coords.shape[0]):
-    for j, (y, x) in enumerate(test_coords[:i+1]):
-        flip_attn[i, j] = test_flips[i, y, x]
-
-fig = go.Figure(
-    data=go.Heatmap(
-        z=flip_attn.cpu().numpy(),
-        x=labels,
-        y=labels,
-        colorscale="gray",
-    )
-)
-fig.update_yaxes(
-    showline=True,
-    linecolor="black",
-    linewidth=1,
-    mirror=True,
-    constrain="domain",
-    autorange="reversed",
-    tickmode="array",
-    tickvals=list(range(len(labels))),
-    ticktext=labels,
-)
-fig.update_xaxes(
-    showline=True,
-    linecolor="black",
-    linewidth=1,
-    mirror=True,
-    scaleanchor="y",
-    scaleratio=1,
-    constrain="domain",
-    tickmode="array",
-    tickvals=list(range(len(labels))),
-    ticktext=labels,
-)
-fig.update_layout(
-    title="Flip Attention Heatmap",
-    xaxis_title="Src Token",
-    yaxis_title="Dst Token",
-    height=600,
-)
-fig.show()
 
 # %%
 n_layer = model.cfg.n_layers
@@ -192,7 +136,7 @@ w_ov = einops.einsum(
     "n_layer n_head d_head o, n_layer n_head v d_head -> n_layer n_head o v",
 )
 w_ov = einops.rearrange(
-    w_ov, "n_layer n_head o v -> (n_layer n_head o) v"
+    w_ov, "n_layer n_head o v -> (n_layer n_head) o v"
 ).detach()
 w_q = einops.rearrange(
     model.W_Q, "n_layer n_head d_model d_head -> (n_layer n_head d_head) d_model"

@@ -152,7 +152,7 @@ def plot_game(
 
 def plot_in_basis(
     vectors: Float[t.Tensor, "n d_model"],
-    probe: Float[t.Tensor, "d_model row col"],
+    probe: Float[t.Tensor, "d_model n_out"],
     labels: List[str],
     filter_by: str = "",
     sort_by: str = "kurtosis",
@@ -162,6 +162,11 @@ def plot_in_basis(
 ):
     # TODO support n_probe
     # transform data vectors, e.g. neuron w_outs to a different basis, e.g. probe and visualise
+    probe = einops.rearrange(
+        probe,
+        "d_model (row col) -> d_model row col",
+        row=int(probe.shape[-1] ** 0.5),
+    )
     transformed_vectors = einops.einsum(
         vectors,
         probe,

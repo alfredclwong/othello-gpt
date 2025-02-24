@@ -2,6 +2,7 @@
 import itertools
 from itertools import product
 from pathlib import Path
+from typing import List
 
 import einops
 import huggingface_hub as hf
@@ -31,12 +32,14 @@ data_dir = root_dir / "data"
 probe_dir = data_dir / "probes"
 probe_dir.mkdir(parents=True, exist_ok=True)
 
-hf.login((root_dir / "secret.txt").read_text())
+# hf.login((root_dir / "secret.txt").read_text())
 wandb.login()
 
 size = 6
 all_squares = get_all_squares(size)
 dataset_dict = load_dataset("awonga/othello-gpt")
+n_test = 100
+test_dataset = dataset_dict["test"].take(n_test)
 
 device = t.device(
     "mps"
@@ -55,7 +58,8 @@ probes = load_probes(
     device,
     w_u=model.W_U.detach(),
     w_e=model.W_E.T.detach(),
-    combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
+    combos=["t+m", "+m-pt", "+t-pt", "+t-pm", "+m-pm"],
+    # combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
     normed=False,
 )
 probes_normed = load_probes(
@@ -63,9 +67,55 @@ probes_normed = load_probes(
     device,
     w_u=model.W_U.detach(),
     w_e=model.W_E.T.detach(),
-    combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
+    combos=["t+m", "+m-pt", "+t-pt", "+t-pm", "+m-pm"],
+    # combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
 )
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
+
+
+# %%
+# Find % of residual stream variance explained by each probe direction
+def variance_decomposition(
+    x: Float[t.Tensor, "batch d_model"],
+    p: Float[t.Tensor, "d_model n_probe"],
+    labels: List[str] = [],
+):
+    n_probes = p.shape[-1]
+    xn = x / x.norm(dim=-1, keepdim=True)
+    pn = p / p.norm(dim=0, keepdim=True)
+    if not labels:
+        labels = list(range(n_probes))
+
+    vs = []
+    ls = []
+    for _ in range(n_probes):
+        d = einops.einsum(xn, pn, "b d, d n -> b n")
+        v = d.square().mean(0)
+        j = v.argmax()
+        vs.append(v[j].item())
+        ls.append(labels[j])
+        xn -= einops.einsum(d[:, j], pn[:, j], "b, d -> b d")
+        pn[:, j] = 0
+    return vs, ls
+
+
+probe_layer = 50
+probe_keys = list("butemcl") + ["pt", "pe", "pm"]
+decomp_probes = t.stack([probes[k][..., probe_layer] for k in probe_keys], dim=1)
+probe_labels = [f"{k}{i}" for k in probe_keys for i in range(size * size)]
+print(probe_labels)
+
+input_ids = t.tensor(test_dataset["input_ids"], device=device)
+_, cache = model.run_with_cache(
+    input_ids[:, :-1],
+    names_filter=lambda name: "hook_resid_" in name or "ln_final.hook_scale" in name,
+)
+X = cache.accumulated_resid(apply_ln=True, incl_mid=True)
+
+args = (X[probe_layer].flatten(0, 1), decomp_probes.flatten(1))
+vs, ls = variance_decomposition(*args, probe_labels)
+
+print(sum(vs), list(zip(vs, ls))[:10])
 
 # %%
 ps = probes_normed
@@ -78,8 +128,40 @@ linear_probe_pptem = t.stack([ps["pp" + k] for k in "tem"], dim=-2)
 linear_probe_dir = t.stack([ps["d"], -ps["d"]], dim=-2)
 linear_probe_unembed = t.stack([-ps["u"], ps["u"]], dim=-2)
 
-# %%
+linear_probe_combo = t.stack([
+    ps["e"] - ps["pe"],
+    ps["m"] - ps["pe"],
+], dim=-2)
+
 pptem_target = lambda x, device: prev_tem_target(x, device, n_shift=2)
+
+# %%
+batch = dataset_dict["test"].take(1)
+plot_game(batch[0])
+# TODO test_loss.argmax() for probe_layer
+preds = [
+    # (linear_probe_unembed, legality_target, "Unembed 'probe'", 60),
+    # (linear_probe_legal, legality_target, "Legal probe", 60),
+    (linear_probe_tem, theirs_empty_mine_target, "TEM probe", 51),
+    (linear_probe_ptem, prev_tem_target, "PTEM probe", 51),
+    # (linear_probe_pptem, pptem_target, "PPTEM probe", 51),
+    # (linear_probe_cap, captures_target, "Captures probe", 50),
+    # (linear_probe_dir, flip_dir_target, "Directions probe", 34),
+    (linear_probe_combo, legality_target, "Combo probe", 51),
+]
+for probe, target_fn, title, probe_layer in preds:
+    plot_probe_preds(
+        model,
+        device,
+        probe,
+        batch,
+        target_fn=lambda x: target_fn(x, device),
+        layer=probe_layer,
+        index=0,
+        title=title,
+    )
+
+# %%
 probe_targets = [
     ("unembed (legal)", linear_probe_unembed, legality_target),
     ("unembed (next move)", linear_probe_unembed, next_move_target),
@@ -92,7 +174,6 @@ probe_targets = [
     ("dir", linear_probe_dir, flip_dir_target),
 ]
 
-test_dataset = dataset_dict["test"].take(1000)
 
 probe_accuracies = {}
 probe_losses = {}
@@ -109,16 +190,15 @@ for name, probe, target_fn in tqdm(probe_targets):
     )
 
     test_loss = einops.reduce(
-        test_loss, "layer batch pos n_out -> layer n_out", t.nanmean
+        test_loss, "layer batch pos n_out -> layer pos n_out", t.nanmean
     )
     test_accs = einops.reduce(
-        test_accs.float(), "layer batch pos n_out -> layer n_out", t.nanmean
+        test_accs.float(), "layer batch pos n_out -> layer pos n_out", t.nanmean
     )
 
     probe_accuracies[name] = test_accs
     probe_losses[name] = test_loss.detach().cpu()
 
-# %%
 colours = [
     "#FF0000",
     "#00FF00",
@@ -145,6 +225,7 @@ cmap = {
     name: colour for name, colour in zip(probe_accuracies, itertools.cycle(colours))
 }
 
+# %%
 fig_loss_layer = make_subplots(
     rows=1, cols=2, subplot_titles=("Test Loss", "Test Accuracy")
 )
@@ -153,7 +234,7 @@ for name in probe_losses:
     fig_loss_layer.add_trace(
         go.Scatter(
             x=list(range(probe_losses[name].shape[0])),
-            y=probe_losses[name].mean(dim=-1),
+            y=probe_losses[name].flatten(1).nanmean(dim=1),
             mode="lines",
             name=name,
             line=dict(color=cmap[name]),
@@ -165,7 +246,7 @@ for name in probe_losses:
     fig_loss_layer.add_trace(
         go.Scatter(
             x=list(range(probe_accuracies[name].shape[0])),
-            y=probe_accuracies[name].mean(dim=-1),
+            y=probe_accuracies[name].flatten(1).nanmean(dim=1),
             mode="lines",
             name=name,
             line=dict(color=cmap[name]),
@@ -196,7 +277,7 @@ for y in range(size):
                 continue
             fig_loss.add_trace(
                 go.Scatter(
-                    y=probe_losses[name][:, y * size + x],
+                    y=probe_losses[name][..., y * size + x].nanmean(1),
                     mode="lines",
                     name=name,
                     line=dict(color=cmap[name]),
@@ -208,7 +289,7 @@ for y in range(size):
             )
             fig_accs.add_trace(
                 go.Scatter(
-                    y=probe_accuracies[name][:, y * size + x],
+                    y=probe_accuracies[name][..., y * size + x].nanmean(1),
                     mode="lines",
                     name=name,
                     line=dict(color=cmap[name]),
@@ -227,7 +308,7 @@ fig_accs.update_layout(
 )
 fig_accs.update_yaxes(range=[0.5, 1], row="all", col="all")
 
-fig_loss.show()
+# fig_loss.show()
 fig_accs.show()
 
 # Why is loss lower and acc higher for legal vs unembed on same legality target?
@@ -235,28 +316,164 @@ fig_accs.show()
 # Unembed (transformer) mininmises cross-entropy over the next token
 
 # %%
-batch = dataset_dict["test"].take(1)
-plot_game(batch[0])
-preds = [
-    (linear_probe_unembed, legality_target, "Unembed 'probe'", 60),  # TODO test_loss.argmax()
-    (linear_probe_legal, legality_target, "Legal probe", 60),
-    (linear_probe_tem, theirs_empty_mine_target, "TEM probe", 51),
-    (linear_probe_ptem, prev_tem_target, "PTEM probe", 51),
-    (linear_probe_pptem, pptem_target, "PPTEM probe", 51),
-    (linear_probe_cap, captures_target, "Captures probe", 50),
-    (linear_probe_dir, flip_dir_target, "Directions probe", 34),
-]
-for probe, target_fn, title, probe_layer in preds:
-    plot_probe_preds(
-        model,
-        device,
-        probe,
-        batch,
-        target_fn=lambda x: target_fn(x, device),
-        layer=probe_layer,
-        index=0,
-        title=title,
+# TODO subplot per probe, line per pos, x-axis layer, y-axis test/loss
+fig_probe_loss = make_subplots(
+    rows=len(probe_targets),
+    cols=1,
+    shared_xaxes=True,
+    subplot_titles=[name for name, _, _ in probe_targets],
+)
+fig_probe_acc = make_subplots(
+    rows=len(probe_targets),
+    cols=1,
+    shared_xaxes=True,
+    subplot_titles=[name for name, _, _ in probe_targets],
+)
+
+for i, (name, probe, target_fn) in enumerate(probe_targets):
+    for pos in range(model.cfg.n_ctx):
+        fig_probe_loss.add_trace(
+            go.Scatter(
+                x=list(range(probe_losses[name].shape[0])),
+                y=probe_losses[name][:, pos].nanmean(dim=1),
+                mode="lines",
+                name=f"{name} pos {pos}",
+                line=dict(color=cmap[name]),
+                showlegend=False,
+            ),
+            row=i + 1,
+            col=1,
+        )
+        fig_probe_acc.add_trace(
+            go.Scatter(
+                x=list(range(probe_accuracies[name].shape[0])),
+                y=probe_accuracies[name][:, pos].nanmean(dim=1),
+                mode="lines",
+                name=f"{name} pos {pos}",
+                line=dict(color=f"rgba(0, 0, 255, {pos / model.cfg.n_ctx})"),
+                showlegend=False,
+            ),
+            row=i + 1,
+            col=1,
+        )
+
+fig_probe_loss.update_layout(
+    height=300 * len(probe_targets),
+    width=1200,
+    title_text="Test Loss per Probe and Position",
+)
+fig_probe_acc.update_layout(
+    height=300 * len(probe_targets),
+    width=1200,
+    title_text="Test Accuracy per Probe and Position",
+)
+
+# fig_probe_loss.show()
+fig_probe_acc.show()
+
+# %%
+probe_losses["cap"].shape
+
+# %%
+# Per probe loss/acc (z) across layers (x) and pos (y)
+fig_probe_loss_acc = make_subplots(
+    rows=len(probe_targets),
+    cols=2,
+    shared_xaxes=True,
+    subplot_titles=[
+        f"{title} {metric}"
+        for title, _, _ in probe_targets
+        for metric in ["loss", "acc"]
+    ],
+)
+
+for i, (name, probe, target_fn) in enumerate(probe_targets):
+    fig_probe_loss_acc.add_trace(
+        go.Heatmap(
+            z=probe_losses[name].nanmean(-1).T,
+            y=list(range(model.cfg.n_ctx)),
+            x=list(range(probe.shape[-1])),
+            colorscale="Greys",
+            showscale=False,
+        ),
+        row=i + 1,
+        col=1,
     )
+    fig_probe_loss_acc.add_trace(
+        go.Heatmap(
+            z=probe_accuracies[name].nanmean(-1).T,
+            y=list(range(model.cfg.n_ctx)),
+            x=list(range(probe.shape[-1])),
+            colorscale="Greys_r",
+            showscale=False,
+        ),
+        row=i + 1,
+        col=2,
+    )
+
+fig_probe_loss_acc.update_layout(
+    height=300 * len(probe_targets),
+    width=1200,
+    title_text="Test Loss and Accuracy per Probe and Position (Heatmap)",
+)
+
+fig_probe_loss_acc.show()
+
+# %%
+fig_loss = make_subplots(
+    rows=size,
+    cols=size,
+    y_title="loss",
+    x_title="layer",
+    subplot_titles=range(model.cfg.n_ctx),
+)
+fig_accs = make_subplots(
+    rows=size,
+    cols=size,
+    y_title="acc",
+    x_title="layer",
+    subplot_titles=range(model.cfg.n_ctx),
+)
+
+for i in range(model.cfg.n_ctx):
+    y, x = divmod(i, size)
+    showlegend = i == 0
+    for name in probe_losses:
+        fig_loss.add_trace(
+            go.Scatter(
+                y=probe_losses[name][:, i].nanmean(1),
+                mode="lines",
+                name=name,
+                line=dict(color=cmap[name]),
+                showlegend=showlegend,
+                legendgroup=name,
+            ),
+            row=y + 1,
+            col=x + 1,
+        )
+        fig_accs.add_trace(
+            go.Scatter(
+                y=probe_accuracies[name][:, i].nanmean(1),
+                mode="lines",
+                name=name,
+                line=dict(color=cmap[name]),
+                showlegend=showlegend,
+                legendgroup=name,
+            ),
+            row=y + 1,
+            col=x + 1,
+        )
+fig_size = 1200
+fig_loss.update_layout(
+    height=fig_size, width=fig_size, title_text="Test Loss for Each Pos"
+)
+fig_accs.update_layout(
+    height=fig_size, width=fig_size, title_text="Test Accuracy for Each Pos"
+)
+fig_accs.update_yaxes(range=[0.5, 1], row="all", col="all")
+
+# fig_loss.show()
+fig_accs.show()
 
 # %%
 # Visualise cross-orthogonality between linear probes, across layers and features
@@ -356,7 +573,21 @@ positional_dots = einops.reduce(
     positional_dots, "rc0 rc1 n_probe n_layer -> (rc0 n_probe) rc1", "mean"
 ).cpu()
 positional_dots = einops.rearrange(positional_dots, "n (r c) -> n r c", r=size)
-positional_names = ["t", "e", "m", "pt", "pe", "pm", "ppt", "ppe", "ppm", "c", "nc", "l", "nl"]
+positional_names = [
+    "t",
+    "e",
+    "m",
+    "pt",
+    "pe",
+    "pm",
+    "ppt",
+    "ppe",
+    "ppm",
+    "c",
+    "nc",
+    "l",
+    "nl",
+]
 plot_game(
     {"boards": positional_dots},
     hovertext=positional_dots,

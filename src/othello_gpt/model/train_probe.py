@@ -1,7 +1,7 @@
 # %%
 import datetime as dt
 from pathlib import Path
-from typing import Callable
+from typing import Callable, List
 
 import huggingface_hub as hf
 import numpy as np
@@ -33,7 +33,7 @@ data_dir = root_dir / "data"
 probe_dir = data_dir / "probes"
 probe_dir.mkdir(parents=True, exist_ok=True)
 
-hf.login((root_dir / "secret.txt").read_text())
+# hf.login((root_dir / "secret.txt").read_text())
 wandb.login()
 
 size = 6
@@ -49,16 +49,14 @@ device = t.device(
 )
 
 # %%
-model = load_model(device, "awonga/othello-gpt-7M")
-
-
-# %%
 def train_linear_probe(
     model: HookedTransformer,
     args: LinearProbeTrainingArgs,
     target_fn: Callable,
+    target_cols: List[str] = [],
 ):
-    test_dataset = dataset_dict["test"].take(args.n_test)
+    cols = ["input_ids"] + target_cols
+    test_dataset = dataset_dict["test"].take(args.n_test).select_columns(cols)
     test_y: Float[t.Tensor, "n_test pos n_out"] = target_fn(test_dataset)
     test_y = test_y.to(device)
     d_probe = test_y.max().item() + 1
@@ -123,7 +121,7 @@ def train_linear_probe(
 
 
 # %%
-default_args = LinearProbeTrainingArgs()
+default_args = LinearProbeTrainingArgs(batch_size=128, n_test=200, use_wandb=False)
 test_args = LinearProbeTrainingArgs(
     use_wandb=False, n_epochs=2, n_steps_per_epoch=10, lr=1e-2
 )
@@ -132,20 +130,22 @@ runs = [
     # ("tem", theirs_empty_mine_target, default_args),
     # ("legal", legality_target, default_args),
     # ("ptem", prev_tem_target, default_args),
-    # ("cap", captures_target, default_args),
-    # ("dir", flip_dir_target, default_args),
-    ("pptem", lambda x, device: prev_tem_target(x, device, n_shift=2), default_args)
+    ("cap", captures_target, default_args, ["flips"]),
+    ("dir", flip_dir_target, default_args, ["flip_dirs"]),
+    # ("pptem", lambda x, device: prev_tem_target(x, device, n_shift=2), default_args)
 ]
 
-for name, fn, args in runs:
+for name, fn, args, cols in runs:
     ts = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     save_path = probe_dir / f"probe_{name}_{ts}.pt"
+    model = load_model(device, "awonga/othello-gpt-7M")
     # args = test_args
-    linear_probe = train_linear_probe(model, args, lambda x: fn(x, device))
+    linear_probe = train_linear_probe(model, args, lambda x: fn(x, device), cols)
     t.save(
         linear_probe,
         save_path,
     )
     del linear_probe
+    t.cuda.empty_cache()
 
 # %%
