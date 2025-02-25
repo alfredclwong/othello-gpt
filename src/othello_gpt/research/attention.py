@@ -39,7 +39,7 @@ size = 6
 all_squares = get_all_squares(size)
 
 # %%
-model = load_model(device, "awonga/othello-gpt-7M")
+model = load_model(device, "awonga/othello-gpt-4M")
 
 # %%
 def visualize_attention_patterns(
@@ -95,7 +95,7 @@ def visualize_attention_patterns(
 
 # %%
 test_dataset = dataset_dict["test"].take(10)
-test_game = test_dataset[0]
+test_game = test_dataset[2]
 test_input_ids = t.tensor(test_game["input_ids"], device=device)
 test_logits, test_cache = model.run_with_cache(test_input_ids[:-1])
 vis = visualize_attention_patterns(

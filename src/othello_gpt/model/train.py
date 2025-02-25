@@ -14,8 +14,7 @@ from tqdm import tqdm
 
 from othello_gpt.data.vis import plot_game
 from othello_gpt.model.nanoGPT import GPT, GPTConfig
-from othello_gpt.util import pad_batch, get_all_squares
-
+from othello_gpt.util import pad_batch, get_all_squares, load_model
 # %%
 device = t.device(
     "mps"
@@ -47,11 +46,12 @@ class HubGPT(GPT, hf.PyTorchModelHubMixin):
 cfg = GPTConfig(
     block_size=(size * size - 4) - 1,
     vocab_size=size * size - 4,  # no pad
-    n_layer=30,
-    n_head=8,
-    n_embd=36 * 4,
+    n_layer=5,
+    n_head=32,
+    n_embd=256,
     dropout=0.0,
-    bias=True,
+    bias=False,
+    weight_tying=False,
 )
 print(cfg)
 model = HubGPT(cfg).to(device)
@@ -60,7 +60,7 @@ model = HubGPT(cfg).to(device)
 # %%
 @dataclass
 class TransformerTrainingArgs:
-    batch_size: int = 256
+    batch_size: int = 512
     epochs: int = 16
     max_steps_per_epoch: int = 1000
     lr: int = 1e-3
@@ -174,15 +174,14 @@ trainer = TransformerTrainer(args, model)
 trainer.train()
 
 # %%
-model.push_to_hub("awonga/othello-gpt-7M")
+model.push_to_hub("awonga/othello-gpt-4M")
 
 # %%
+model = load_model(device, "awonga/othello-gpt-4M")
 n_focus = 50
 focus_games = dataset_dict["test"].take(n_focus)
-focus_input_ids = pad_batch(focus_games["input_ids"], max_len=cfg.block_size + 1).to(
-    device
-)
-focus_logits, loss = model(focus_input_ids[:, :-1], focus_input_ids[:, 1:])
+focus_input_ids = t.tensor(focus_games["input_ids"], device=device)
+focus_logits = model(focus_input_ids[:, :-1])
 focus_logit_boards = t.full((n_focus, focus_logits.shape[1], size, size), 0.0)
 focus_logit_boards.flatten(2)[..., get_all_squares(size)] = focus_logits.detach().cpu()
 

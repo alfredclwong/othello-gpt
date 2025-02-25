@@ -44,11 +44,16 @@ def forward_probe(
 
     y = target_fn(batch)
     correct_log_probs = eindex(
-        log_probs, y, "layer batch n_ctx n_out [batch n_ctx n_out]"
+        log_probs, y.int(), "layer batch n_ctx n_out [batch n_ctx n_out]"
     )
-    loss = -correct_log_probs.mean() if scalar_loss else -correct_log_probs
+    mask = ~y.isnan()  # don't train on nan targets
+    correct_log_probs = correct_log_probs.masked_fill(~mask, t.nan)
+    loss = -correct_log_probs.nanmean() if scalar_loss else -correct_log_probs
 
-    return log_probs, loss
+    if return_labels:
+        return log_probs, loss, labels
+    else:
+        return log_probs, loss
 
 
 def next_move_target(batch, device) -> Float[t.Tensor, "batch pos n_out"]:
@@ -59,8 +64,19 @@ def next_move_target(batch, device) -> Float[t.Tensor, "batch pos n_out"]:
         for j in range(coords.shape[1]):
             y, x = coords[i, j]
             next_move_board[i, j, y, x] = 1
-    return next_move_board.flatten(2).int()
+    return next_move_board.flatten(2)
 
+
+def empty_target(batch, device):
+    boards = t.tensor(batch["boards"], device=device)[:, :-1]
+    return (boards == 0).flatten(2)
+
+
+def tm_target(batch, device):
+    boards = t.tensor(batch["boards"], device=device)[:, :-1]
+    boards[:, 1::2] *= -1
+    boards = t.where(boards == 0, t.nan, boards == 1)
+    return boards.flatten(2)
 
 def theirs_empty_mine_target(batch, device) -> Float[t.Tensor, "batch pos n_out"]:
     boards = t.tensor(batch["boards"], device=device)[:, :-1]
@@ -81,11 +97,17 @@ def prev_tem_target(batch, device, n_shift=1) -> Float[t.Tensor, "batch pos n_ou
     initial_board[:, -1, [i, i + 1], [i + 1, i]] = 1
     initial_board = initial_board.flatten(2) + 1
 
-    return t.cat([initial_board, tem[:, :-n_shift]], dim=1).int()
+    return t.cat([initial_board, tem[:, :-n_shift]], dim=1)
 
 
 def legality_target(batch, device):
-    return t.tensor(batch["legalities"], device=device)[:, 1:].int().flatten(2)
+    return t.tensor(batch["legalities"], device=device)[:, 1:].flatten(2)
+
+
+def l_if_e_target(batch, device):
+    e = empty_target(batch, device)
+    l = legality_target(batch, device)
+    return t.where(e.bool(), l, t.nan)
 
 
 # def flip_parity_target(batch, device):

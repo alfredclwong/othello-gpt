@@ -56,6 +56,10 @@ probe_layer = 50
 {k: p.shape for k, p in probes.items()}  # d_model (row col) probe_layer
 
 # %%
+# Find alignment of w_outs with L probe
+probes["l"].shape
+
+# %%
 # Circuits:
 #  1. TEM (spatial) -> L
 #  2. PT,C' -> M-PT

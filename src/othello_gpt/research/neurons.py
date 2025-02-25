@@ -39,7 +39,7 @@ size = 6
 all_squares = get_all_squares(size)
 
 # %%
-model = load_model(device, "awonga/othello-gpt-7M")
+model = load_model(device, "awonga/othello-gpt-6M")
 
 # %%
 probes = load_probes(
@@ -47,7 +47,7 @@ probes = load_probes(
     device,
     w_u=model.W_U.detach(),
     w_e=model.W_E.T.detach(),
-    combos=["+m-pt", "+t-pt", "+t-pm", "+m-pm", "+e-pe", "+m-pe"],
+    combos=["+t-m", "t+m", "+m-pt", "+t-pt", "+t-pm", "+m-pm"],
 )
 # probes["r"] = t.randn_like(probes["u"])
 # probes["r"] /= probes["r"].norm(dim=0, keepdim=True)
@@ -68,13 +68,79 @@ neurons = {
     "w_out": w_out,
 }
 
+# %%
+# Find % of residual stream variance explained by each probe direction
+def variance_decomposition(
+    x: Float[t.Tensor, "d_model ..."],
+    p: Float[t.Tensor, "d_model ..."],
+):
+    xn = x / x.norm(dim=0, keepdim=True)
+    pn = p / p.norm(dim=0, keepdim=True)
+    d = einops.einsum(xn.flatten(1), pn.flatten(1), "d x, d p -> p x")
+    v = d.square()
+    v = v.reshape([
+        *p.shape[1:],
+        *x.shape[1:],
+    ])
+    return v
+
+# %%
+# Find the neurons that write out legal direction for each square
+out_keys = list("tmu")
+out_probes = t.cat(probes[k] for )
+
+# %%
+in_keys = "temc"
+out_keys = list("temlu") + ["+m-pt", "+t-pt", "+t-pm", "+m-pm", "+e-pe", "+m-pe"]
+# neuron_layer = 6
+out_square = 0
+# probe_layer = (neuron_layer + 1) * 2
+probe_layer = 12
+
+out_probes = t.stack([probes[k] for k in out_keys])[:, :, out_square, probe_layer].transpose(0, 1)
+in_probes = t.stack([probes[k] for k in in_keys])[:, :, :, probe_layer].transpose(0, 1)
+
+out_vars = variance_decomposition(w_in.transpose(1, 2).transpose(0, 1), out_probes)
+n_layers = out_vars.shape[1]
+fig = go.Figure()
+fig.add_trace(
+    go.Heatmap(
+        z=out_vars.flatten(0, 1).detach().cpu(),
+        y=[f"M{i} {k}" for k in out_keys for i in range(n_layers)],
+        colorscale="gray",
+    ),
+)
+fig.update_layout(height=1200)
+fig.show()
+
+# fig = make_subplots(rows=len(in_keys)+len(out_keys), cols=1, subplot_titles=["in", "out"])
+# fig.add_trace(
+#     go.Heatmap(
+#         z=variance_decomposition(w_in[neuron_layer], decomp_probes).detach().cpu().T,
+#         y=[f"{k}"for k in probe_keys],
+#         colorscale="gray",
+#     ), row=1, col=1,
+# )
+# fig.add_trace(
+#     go.Heatmap(
+#         z=variance_decomposition(w_out[neuron_layer], decomp_probes).detach().cpu().T,
+#         y=[f"{k}"for k in probe_keys],
+#         colorscale="gray",
+#     ), row=2, col=1,
+# )
+# fig.update_layout(
+#     title=f"M{neuron_layer} vs P{probe_layer} at Square {square_index}",
+#     height=1000,
+# )
+# fig.show()
 
 # %%
 labels = [f"M{l} N{n}" for l in range(n_layer) for n in range(n_neuron)]
-probe_layer = 50
+probe_layer = 16
 # probe_name = "t-m"
 # probe_name = "e"
-probe_name = "+m-pe"
+# probe_name = "+m-pe"
+probe_name = "l"
 probe = probes[probe_name][..., probe_layer]
 for s in ["pos", "neg"]:
     for n, w in neurons.items():
@@ -91,9 +157,8 @@ for s in ["pos", "neg"]:
 # %%
 # TODO make fn for plotting all these together
 # TODO graph discovery
-# Show a modular neuron circuit in L1 for legality
-# neuron = (29, 508)
-neuron = (24, 513)
+# Show a modular neuron circuit for legality
+neuron = (-1, 140)
 probe_layer = (neuron[0] + 1) * 2
 neuron_probes = {
     "w_in": list("tem"),

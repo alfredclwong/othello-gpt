@@ -229,6 +229,8 @@ def plot_probe_preds(
     )
     pred_prob = t.exp(pred_logprob).cpu()
     pred_prob, pred_index = pred_prob.max(dim=-1)
+    pred_index = pred_index.float()
+    pred_index[..., t.isnan(target)] = t.nan
 
     n_out = probe.shape[1]
     if n_out < t.tensor(batch["moves"]).max():

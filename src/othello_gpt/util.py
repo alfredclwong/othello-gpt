@@ -40,28 +40,55 @@ def test_linear_probe(
     linear_probe,
     target_fn,
     scalar_loss=True,
+    return_labels=False,
 ):
-    test_y_logprobs, test_loss = forward_probe(
+    result = forward_probe(
         model,
         device,
         linear_probe,
         test_dataset,
         target_fn,
         scalar_loss=scalar_loss,
+        return_labels=return_labels,
     )
-    test_accs = test_y_logprobs.argmax(-1) == test_y  # TODO check
-    test_accs = test_accs.cpu()
-    return test_loss, test_accs.float()
+    test_y_logprobs = result[0]
+    test_accs = test_y_logprobs.argmax(-1) == test_y
+    test_accs = t.where(t.isnan(test_y), t.nan, test_accs.float())
+    test_accs = test_accs.cpu().float()
+    if return_labels:
+        _, test_loss, labels = result
+        return test_loss, test_accs, labels
+    else:
+        _, test_loss = result
+        return test_loss, test_accs
 
 
-def load_probes(probe_dir: Path, device, w_u=None, w_e=None, normed=True, combos=[]):
+def load_probes(
+    probe_dir: Path, device, w_u=None, w_e=None, w_p=None, normed=True, combos=[]
+):
+    # probe_names = {
+    #     "tem": "probe_tem_20250221_012810.pt",
+    #     (None, "c"): "probe_cap_20250221_025002.pt",
+    #     (None, "l"): "probe_legal_20250221_014256.pt",
+    #     ("pt", "pe", "pm"): "probe_ptem_20250221_021621.pt",
+    #     ("ppt", "ppe", "ppm"): "probe_pptem_20250221_191411.pt",
+    #     "d": "probe_dir_20250221_145729.pt",
+    # }
+    # probe_names = {
+    #     "met": "probe_6M_tem_20250224_172530.pt",
+    #     (None, "c"): "probe_6M_cap_20250224_174614.pt",
+    #     (None, "l"): "probe_6M_legal_20250224_171928.pt",
+    #     ("pt", "pe", "pm"): "probe_6M_ptem_20250224_173215.pt",
+    #     # ("ppm", "ppe", "ppt"): "probe_6M_pptem_20250224_173858.pt",
+    # }
     probe_names = {
-        "tem": "probe_tem_20250221_012810.pt",
-        (None, "c"): "probe_cap_20250221_025002.pt",
-        (None, "l"): "probe_legal_20250221_014256.pt",
-        ("pt", "pe", "pm"): "probe_ptem_20250221_021621.pt",
-        ("ppt", "ppe", "ppm"): "probe_pptem_20250221_191411.pt",
-        "d": "probe_dir_20250221_145729.pt",
+        "met": "probe_4M_tem_20250225_045520.pt",
+        (None, "c"): "probe_4M_cap_20250225_051206.pt",
+        (None, "l"): "probe_4M_legal_20250225_045040.pt",
+        ("pt", "pe", "pm"): "probe_4M_ptem_20250225_050051.pt",
+        (None, "ee"): "probe_4M_ee_20250225_155557.pt",
+        (None, "tm"): "probe_4M_tm_20250225_181200.pt",
+        (None, "le"): "probe_4M_le_20250225_181838.pt",
     }
 
     probes = {}
@@ -88,6 +115,10 @@ def load_probes(probe_dir: Path, device, w_u=None, w_e=None, normed=True, combos
             "d_model row col -> d_model row col n",
             n=n_probe_layers,
         ).flatten(1, 2)
+    if w_p is not None:
+        probes["p"] = einops.repeat(
+            w_p, "d_model pos -> d_model pos n", n=n_probe_layers
+        )
 
     if normed:
         for k in probes:
@@ -134,18 +165,35 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
         n_head = 4
         n_embd = 256
         bias = True
+        weight_tying = True
     elif name == "awonga/othello-gpt-30l":
         size = 6
         n_layer = 30
         n_head = 2
         n_embd = 108
         bias = False
+        weight_tying = True
     elif name == "awonga/othello-gpt-7M":
         size = 6
         n_layer = 30
         n_head = 8
         n_embd = 144
         bias = True
+        weight_tying = False
+    elif name == "awonga/othello-gpt-6M":
+        size = 6
+        n_layer = 8
+        n_head = 8
+        n_embd = 256
+        bias = True
+        weight_tying = False
+    elif name == "awonga/othello-gpt-4M":
+        size = 6
+        n_layer = 5
+        n_head = 32
+        n_embd = 256
+        bias = False
+        weight_tying = False
     else:
         raise ValueError(name)
 
@@ -157,6 +205,7 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
         n_embd=n_embd,
         dropout=0.0,
         bias=bias,
+        weight_tying=weight_tying,
     )
     hooked_cfg = HookedTransformerConfig(
         n_layers=nano_cfg.n_layer,

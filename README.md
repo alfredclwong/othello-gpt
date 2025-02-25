@@ -37,7 +37,7 @@ Replicating the Othello GPT paper (https://arxiv.org/pdf/2210.13382) and Neel Na
 ## Research summary
 
 # probe.py
-1. Break down %var explained by each probe
+1. [TODO] Break down %var explained by each probe
 2. Plot probe loss/acc vs layer, pos
 3. Plot probe predictions
 4. Plot cross-orthogonality between probes
