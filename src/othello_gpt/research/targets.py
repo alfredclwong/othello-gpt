@@ -72,30 +72,59 @@ def empty_target(batch, device):
     return (boards == 0).flatten(2)
 
 
+def prev_empty_target(batch, device, n_shift=1):
+    e = empty_target(batch, device)
+    n_batch = e.shape[0]
+    n_out = e.shape[-1]
+    e0 = t.full((n_batch, n_shift, n_out), t.nan, device=device)
+    return t.cat([e0, e[:, :-n_shift]], dim=1)
+
+
 def tm_target(batch, device):
     boards = t.tensor(batch["boards"], device=device)[:, :-1]
     boards[:, 1::2] *= -1
     boards = t.where(boards == 0, t.nan, boards == 1)
     return boards.flatten(2)
 
+
+def ptm_target(batch, device, n_shift=1):
+    tm = tm_target(batch, device)
+    n_batch = tm.shape[0]
+    n_out = tm.shape[-1]
+    initial_board = t.full((n_batch, n_shift, n_out), t.nan, device=device)
+    return t.cat([initial_board, 1-tm[:, :-n_shift]], dim=1)
+
+
+def bw_target(batch, device):
+    # TODO check sign
+    boards = t.tensor(batch["boards"], device=device)[:, :-1]
+    boards = t.where(boards == 0, t.nan, boards == 1)
+    return boards.flatten(2)
+
+
 def theirs_empty_mine_target(batch, device) -> Float[t.Tensor, "batch pos n_out"]:
+    # TODO switch t/m
     boards = t.tensor(batch["boards"], device=device)[:, :-1]
     boards[:, 1::2] *= -1
     boards += 1
     return boards.flatten(2)
 
 
-def prev_tem_target(batch, device, n_shift=1) -> Float[t.Tensor, "batch pos n_out"]:
+def prev_tem_target(batch, device, n_shift=1, pad_nan=True) -> Float[t.Tensor, "batch pos n_out"]:
     tem = theirs_empty_mine_target(batch, device)
 
     n_batch = tem.shape[0]
-    size = int((tem.shape[-1] + 4) ** 0.5)
+    n_out = tem.shape[-1]
+    size = int((n_out + 4) ** 0.5)
 
-    initial_board = t.zeros((n_batch, n_shift, size, size), device=device)
-    i = size // 2 - 1
-    initial_board[:, -1, [i, i + 1], [i, i + 1]] = -1
-    initial_board[:, -1, [i, i + 1], [i + 1, i]] = 1
-    initial_board = initial_board.flatten(2) + 1
+    if pad_nan:
+        initial_board = t.full((n_batch, n_shift, n_out), t.nan, device=device)
+    else:
+        initial_board = t.zeros((n_batch, n_shift, size, size), device=device)
+        i = size // 2 - 1
+        initial_board[:, -1, [i, i + 1], [i, i + 1]] = -1
+        initial_board[:, -1, [i, i + 1], [i + 1, i]] = 1
+        initial_board = initial_board.flatten(2) + 1
 
     return t.cat([initial_board, tem[:, :-n_shift]], dim=1)
 
@@ -139,6 +168,29 @@ def captures_target(batch, device):
     # After H0, we have [my moves; their moves; my moves flipped; their moves flipped]
     # This gives us the
     return t.tensor(batch["flips"], device=device)[:, :-1].int().flatten(2)
+
+
+def c_if_ne_target(batch, device):
+    e = empty_target(batch, device)
+    c = captures_target(batch, device)
+    return t.where(~e.bool(), c, t.nan)
+
+
+def c_if_t_target(batch, device):
+    # TODO c_if_ray_target
+    # explanation: i think the model embeds capture vectors into every square
+    # that a move `could` capture (or a reasonable average prior) and then
+    # corrects this in subsequent layers, so we can use a stricter condition
+    # than non-empty, theirs or prev mine to further isolate the probe
+    met = theirs_empty_mine_target(batch, device)
+    c = captures_target(batch, device)
+    return t.where(met == 2, c, t.nan)
+
+
+def c_if_pm_target(batch, device):
+    ptem = prev_tem_target(batch, device, pad_nan=False)
+    c = captures_target(batch, device)
+    return t.where(ptem == 2, c, t.nan)
 
 
 # def tem_captures_target(batch, device):

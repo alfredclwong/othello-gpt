@@ -67,28 +67,42 @@ def load_probes(
     probe_dir: Path, device, w_u=None, w_e=None, w_p=None, normed=True, combos=[]
 ):
     # probe_names = {
-    #     "tem": "probe_tem_20250221_012810.pt",
-    #     (None, "c"): "probe_cap_20250221_025002.pt",
-    #     (None, "l"): "probe_legal_20250221_014256.pt",
-    #     ("pt", "pe", "pm"): "probe_ptem_20250221_021621.pt",
-    #     ("ppt", "ppe", "ppm"): "probe_pptem_20250221_191411.pt",
-    #     "d": "probe_dir_20250221_145729.pt",
+    #     # "met": "probe_4M_tem_20250225_045520.pt",
+    #     (None, "c"): "probe_4M_cap_20250225_051206.pt",
+    #     # (None, "l"): "probe_4M_legal_20250225_045040.pt",
+    #     # ("pt", "pe", "pm"): "probe_4M_ptem_20250225_050051.pt",
+    #     (None, "ee"): "probe_4M_ee_20250225_155557.pt",
+    #     (None, "tm"): "probe_4M_tm_20250225_181200.pt",
+    #     (None, "le"): "probe_4M_le_20250225_181838.pt",
+    #     (None, "cne"): "probe_4M_cne_20250226_004252.pt",
+    #     (None, "cpm"): "probe_4M_cpm_20250226_003126.pt",
+    #     (None, "ct"): "probe_4M_ct_20250226_002037.pt",
+    #     # (None, "bw"): "probe_4M_bw_20250226_162908.pt",
+    #     (None, "ptm"): "probe_4M_ptm_20250226_171349.pt",
+    #     (None, "pee"): "probe_4M_pee_20250226_181424.pt",
     # }
     # probe_names = {
-    #     "met": "probe_6M_tem_20250224_172530.pt",
-    #     (None, "c"): "probe_6M_cap_20250224_174614.pt",
-    #     (None, "l"): "probe_6M_legal_20250224_171928.pt",
-    #     ("pt", "pe", "pm"): "probe_6M_ptem_20250224_173215.pt",
-    #     # ("ppm", "ppe", "ppt"): "probe_6M_pptem_20250224_173858.pt",
+    #     "met": "probe_800k_tem_20250225_205930.pt",
+    #     (None, "c"): "probe_800k_cap_20250225_211044.pt",
+    #     (None, "l"): "probe_800k_legal_20250225_205443.pt",
+    #     ("pt", "pe", "pm"): "probe_800k_ptem_20250225_210508.pt",
+    #     (None, "ee"): "probe_800k_ee_20250225_212947.pt",
+    #     (None, "tm"): "probe_800k_tm_20250225_211512.pt",
+    #     (None, "le"): "probe_800k_le_20250225_212042.pt",
+    #     (None, "cne"): "probe_800k_cne_20250225_231938.pt",
+    #     (None, "cpm"): "probe_800k_cpm_20250225_231012.pt",
+    #     (None, "ct"): "probe_800k_ct_20250225_230049.pt",
     # }
     probe_names = {
-        "met": "probe_4M_tem_20250225_045520.pt",
-        (None, "c"): "probe_4M_cap_20250225_051206.pt",
-        (None, "l"): "probe_4M_legal_20250225_045040.pt",
-        ("pt", "pe", "pm"): "probe_4M_ptem_20250225_050051.pt",
-        (None, "ee"): "probe_4M_ee_20250225_155557.pt",
-        (None, "tm"): "probe_4M_tm_20250225_181200.pt",
-        (None, "le"): "probe_4M_le_20250225_181838.pt",
+        (None, "c"): "probe_6M_cap_20250226_185453.pt",
+        (None, "ee"): "probe_6M_ee_20250226_195517.pt",
+        (None, "tm"): "probe_6M_tm_20250226_193647.pt",
+        (None, "le"): "probe_6M_le_20250226_194352.pt",
+        (None, "cne"): "probe_6M_cne_20250226_192345.pt",
+        (None, "cpm"): "probe_6M_cpm_20250226_191228.pt",
+        (None, "ct"): "probe_6M_ct_20250226_190107.pt",
+        ("ptm", None): "probe_6M_ptm_20250226_184808.pt",
+        (None, "pee"): "probe_6M_pee_20250226_200214.pt",
     }
 
     probes = {}
@@ -102,7 +116,7 @@ def load_probes(
                 continue
             probes[n] = probe[..., i, :]
 
-    n_probe_layers = probes["t"].shape[-1]
+    n_probe_layers = probes[list(probes.keys())[0]].shape[-1]
     if w_u is not None:
         probes["u"] = einops.repeat(
             vocab_to_board(w_u),
@@ -192,6 +206,13 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
         n_layer = 5
         n_head = 32
         n_embd = 256
+        bias = False
+        weight_tying = False
+    elif name == "awonga/othello-gpt-800k":
+        size = 6
+        n_layer = 4
+        n_head = 32
+        n_embd = 128
         bias = False
         weight_tying = False
     else:

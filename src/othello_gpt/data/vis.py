@@ -218,6 +218,12 @@ def plot_probe_preds(
     title="",
 ):
     target = target_fn(batch).detach().cpu()
+
+    # hacky: for prev targets, we might set the first pos to all nans
+    # the plotting code doesn't like this, so fill it
+    if t.all(t.isnan(target[:, 0, :])):
+        target[:, 0, :] = 0
+
     pred_logprob, labels = forward_probe(
         model,
         device,

@@ -11,7 +11,7 @@ from transformer_lens import ActivationCache
 import circuitsvis as cv
 from IPython.display import HTML
 
-from othello_gpt.data.vis import plot_in_basis
+from othello_gpt.data.vis import plot_in_basis, plot_game
 from othello_gpt.util import (
     get_all_squares,
     load_model,
@@ -39,7 +39,7 @@ size = 6
 all_squares = get_all_squares(size)
 
 # %%
-model = load_model(device, "awonga/othello-gpt-4M")
+model = load_model(device, "awonga/othello-gpt-6M")
 
 # %%
 def visualize_attention_patterns(
@@ -95,7 +95,7 @@ def visualize_attention_patterns(
 
 # %%
 test_dataset = dataset_dict["test"].take(10)
-test_game = test_dataset[2]
+test_game = test_dataset[0]
 test_input_ids = t.tensor(test_game["input_ids"], device=device)
 test_logits, test_cache = model.run_with_cache(test_input_ids[:-1])
 vis = visualize_attention_patterns(
@@ -104,6 +104,9 @@ vis = visualize_attention_patterns(
     test_game["moves"],
 )
 HTML(vis)
+
+# %%
+plot_game(test_game)
 
 # %%
 probes = load_probes(

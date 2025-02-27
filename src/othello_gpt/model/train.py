@@ -174,10 +174,10 @@ trainer = TransformerTrainer(args, model)
 trainer.train()
 
 # %%
-model.push_to_hub("awonga/othello-gpt-4M")
+model.push_to_hub("awonga/othello-gpt-800k")
 
 # %%
-model = load_model(device, "awonga/othello-gpt-4M")
+model = load_model(device, "awonga/othello-gpt-800k")
 n_focus = 50
 focus_games = dataset_dict["test"].take(n_focus)
 focus_input_ids = t.tensor(focus_games["input_ids"], device=device)
