@@ -11,7 +11,7 @@ from plotly.subplots import make_subplots
 from transformer_lens import HookedTransformer
 from typing import List, Tuple
 
-from othello_gpt.data.vis import plot_in_basis
+from othello_gpt.data.vis import plot_in_basis, move_id_to_text
 from scipy.stats import kurtosis
 from othello_gpt.util import (
     get_all_squares,
@@ -39,7 +39,9 @@ size = 6
 all_squares = get_all_squares(size)
 
 # %%
-model = load_model(device, "awonga/othello-gpt-6M")
+# version = "6M"
+version = "4M"
+model = load_model(device, f"awonga/othello-gpt-{version}")
 
 # %%
 probes = load_probes(
@@ -47,7 +49,12 @@ probes = load_probes(
     device,
     w_u=model.W_U.detach(),
     w_e=model.W_E.T.detach(),
-    combos=["+t-m", "t+m", "+m-pt", "+t-pt", "+t-pm", "+m-pm"],
+    # combos=["+t-m", "t+m", "+m-pt", "+t-pt", "+t-pm", "+m-pm"],
+    combos=[
+        # "+t-m",
+        "+pee-ee",
+    ],
+    model_version=version,
 )
 # probes["r"] = t.randn_like(probes["u"])
 # probes["r"] /= probes["r"].norm(dim=0, keepdim=True)
@@ -69,78 +76,97 @@ neurons = {
 }
 
 # %%
-# Find % of residual stream variance explained by each probe direction
-def variance_decomposition(
-    x: Float[t.Tensor, "d_model ..."],
-    p: Float[t.Tensor, "d_model ..."],
-):
-    xn = x / x.norm(dim=0, keepdim=True)
-    pn = p / p.norm(dim=0, keepdim=True)
-    d = einops.einsum(xn.flatten(1), pn.flatten(1), "d x, d p -> p x")
-    v = d.square()
-    v = v.reshape([
-        *p.shape[1:],
-        *x.shape[1:],
-    ])
-    return v
+model.b_K
 
 # %%
-# Find the neurons that write out legal direction for each square
-out_keys = list("tmu")
-out_probes = t.cat(probes[k] for )
-
-# %%
-in_keys = "temc"
-out_keys = list("temlu") + ["+m-pt", "+t-pt", "+t-pm", "+m-pm", "+e-pe", "+m-pe"]
-# neuron_layer = 6
-out_square = 0
-# probe_layer = (neuron_layer + 1) * 2
-probe_layer = 12
-
-out_probes = t.stack([probes[k] for k in out_keys])[:, :, out_square, probe_layer].transpose(0, 1)
-in_probes = t.stack([probes[k] for k in in_keys])[:, :, :, probe_layer].transpose(0, 1)
-
-out_vars = variance_decomposition(w_in.transpose(1, 2).transpose(0, 1), out_probes)
-n_layers = out_vars.shape[1]
+layers = list(range(n_layer))
+layers = [1]
+heads = list(range(n_head))
+heads = [0]
+labels = [
+    f"L{l}H{h}D{d}"
+    for l in layers
+    for h in heads
+    for d in range(d_head)
+]
+probe_key = "tm"
+# probe_key = "+pee-ee"
+w_k_ee = einops.einsum(
+    model.W_K[layers][:, heads].transpose(-2, -1).flatten(0, -2),
+    probes[probe_key][..., 4],
+    "lhd d_model, d_model n_out -> lhd n_out"
+)
 fig = go.Figure()
 fig.add_trace(
     go.Heatmap(
-        z=out_vars.flatten(0, 1).detach().cpu(),
-        y=[f"M{i} {k}" for k in out_keys for i in range(n_layers)],
-        colorscale="gray",
-    ),
+        z=w_k_ee.detach().cpu(),
+        x=[move_id_to_text(i, size) for i in range(size * size)],
+        y=labels,
+    )
 )
-fig.update_layout(height=1200)
+fig.update_layout(
+    title=f"W_K in {probe_key.upper()} space",
+    height=1200,
+)
 fig.show()
 
-# fig = make_subplots(rows=len(in_keys)+len(out_keys), cols=1, subplot_titles=["in", "out"])
-# fig.add_trace(
-#     go.Heatmap(
-#         z=variance_decomposition(w_in[neuron_layer], decomp_probes).detach().cpu().T,
-#         y=[f"{k}"for k in probe_keys],
-#         colorscale="gray",
-#     ), row=1, col=1,
-# )
-# fig.add_trace(
-#     go.Heatmap(
-#         z=variance_decomposition(w_out[neuron_layer], decomp_probes).detach().cpu().T,
-#         y=[f"{k}"for k in probe_keys],
-#         colorscale="gray",
-#     ), row=2, col=1,
-# )
-# fig.update_layout(
-#     title=f"M{neuron_layer} vs P{probe_layer} at Square {square_index}",
-#     height=1000,
-# )
-# fig.show()
+# %%
+layers = [2]
+heads = [1]
+labels = [
+    f"L{l}H{h}D{d}"
+    for l in layers
+    for h in heads
+    for d in range(d_head)
+]
+# probe_key = "b"
+probe_key = "+pee-ee"
+w_q_ee = einops.einsum(
+    model.W_Q[layers, heads].transpose(-2, -1).flatten(0, -2),
+    probes[probe_key][..., 4],
+    "lhd d_model, d_model n_out -> lhd n_out"
+)
+fig = go.Figure()
+fig.add_trace(
+    go.Heatmap(
+        z=w_q_ee.detach().cpu(),
+        x=[move_id_to_text(i, size) for i in range(size * size)],
+        y=labels,
+    )
+)
+fig.update_layout(
+    title=f"W_Q in {probe_key.upper()} space",
+    height=1200,
+)
+fig.show()
 
 # %%
-labels = [f"M{l} N{n}" for l in range(n_layer) for n in range(n_neuron)]
-probe_layer = 16
+labels = [f"L{l}N{n}" for l in range(n_layer) for n in range(n_neuron)]
+w_in_l2_ee = einops.einsum(
+    w_in, probes["ee"][..., 4], "layer neuron d_model, d_model n_out -> layer neuron n_out"
+).flatten(0, 1)
+fig = go.Figure()
+fig.add_trace(
+    go.Heatmap(
+        z=w_in_l2_ee.detach().cpu(),
+        x=[move_id_to_text(i, size) for i in range(size * size)],
+        y=labels,
+    )
+)
+fig.update_layout(
+    height=800,
+    title="W_in in EE space"
+)
+fig.show()
+
+# %%
+labels = [f"M{l} N{n}" for l in [2] for n in range(n_neuron)]
+probe_layer = 5
 # probe_name = "t-m"
 # probe_name = "e"
 # probe_name = "+m-pe"
-probe_name = "l"
+# probe_name = "l"
+probe_name = "ee"
 probe = probes[probe_name][..., probe_layer]
 for s in ["pos", "neg"]:
     for n, w in neurons.items():
@@ -226,6 +252,7 @@ for n in neurons:
 
 # %%
 probes["t"].shape
+
 
 # %%
 def probe_neurons(
@@ -361,6 +388,7 @@ def plot_neuron_excess_kurtosis(
         showlegend=False,
     )
 
+
 # %%
 # layers = [2, 4]
 probe_layers = [6, 30, 54]
@@ -375,7 +403,7 @@ for row, layer in enumerate(probe_layers):
         plot_neuron_excess_kurtosis(
             w_in, w_out, p[..., layer], fig=fig, row=row + 1, col=col + 1
         )
-fig.update_layout(height=1600, width=200*len(probes))
+fig.update_layout(height=1600, width=200 * len(probes))
 fig.show()
 
 

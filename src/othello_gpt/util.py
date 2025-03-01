@@ -64,46 +64,64 @@ def test_linear_probe(
 
 
 def load_probes(
-    probe_dir: Path, device, w_u=None, w_e=None, w_p=None, normed=True, combos=[]
+    probe_dir: Path, device, w_u=None, w_e=None, w_p=None, normed=True, combos=[],
+    model_version="2M",
 ):
-    # probe_names = {
-    #     # "met": "probe_4M_tem_20250225_045520.pt",
-    #     (None, "c"): "probe_4M_cap_20250225_051206.pt",
-    #     # (None, "l"): "probe_4M_legal_20250225_045040.pt",
-    #     # ("pt", "pe", "pm"): "probe_4M_ptem_20250225_050051.pt",
-    #     (None, "ee"): "probe_4M_ee_20250225_155557.pt",
-    #     (None, "tm"): "probe_4M_tm_20250225_181200.pt",
-    #     (None, "le"): "probe_4M_le_20250225_181838.pt",
-    #     (None, "cne"): "probe_4M_cne_20250226_004252.pt",
-    #     (None, "cpm"): "probe_4M_cpm_20250226_003126.pt",
-    #     (None, "ct"): "probe_4M_ct_20250226_002037.pt",
-    #     # (None, "bw"): "probe_4M_bw_20250226_162908.pt",
-    #     (None, "ptm"): "probe_4M_ptm_20250226_171349.pt",
-    #     (None, "pee"): "probe_4M_pee_20250226_181424.pt",
-    # }
-    # probe_names = {
-    #     "met": "probe_800k_tem_20250225_205930.pt",
-    #     (None, "c"): "probe_800k_cap_20250225_211044.pt",
-    #     (None, "l"): "probe_800k_legal_20250225_205443.pt",
-    #     ("pt", "pe", "pm"): "probe_800k_ptem_20250225_210508.pt",
-    #     (None, "ee"): "probe_800k_ee_20250225_212947.pt",
-    #     (None, "tm"): "probe_800k_tm_20250225_211512.pt",
-    #     (None, "le"): "probe_800k_le_20250225_212042.pt",
-    #     (None, "cne"): "probe_800k_cne_20250225_231938.pt",
-    #     (None, "cpm"): "probe_800k_cpm_20250225_231012.pt",
-    #     (None, "ct"): "probe_800k_ct_20250225_230049.pt",
-    # }
-    probe_names = {
-        (None, "c"): "probe_6M_cap_20250226_185453.pt",
-        (None, "ee"): "probe_6M_ee_20250226_195517.pt",
-        (None, "tm"): "probe_6M_tm_20250226_193647.pt",
-        (None, "le"): "probe_6M_le_20250226_194352.pt",
-        (None, "cne"): "probe_6M_cne_20250226_192345.pt",
-        (None, "cpm"): "probe_6M_cpm_20250226_191228.pt",
-        (None, "ct"): "probe_6M_ct_20250226_190107.pt",
-        ("ptm", None): "probe_6M_ptm_20250226_184808.pt",
-        (None, "pee"): "probe_6M_pee_20250226_200214.pt",
-    }
+    if model_version == "4M":
+        probe_names = {
+            "met": "probe_4M_tem_20250225_045520.pt",
+            (None, "c"): "probe_4M_cap_20250225_051206.pt",
+            # (None, "l"): "probe_4M_legal_20250225_045040.pt",
+            # ("pt", "pe", "pm"): "probe_4M_ptem_20250225_050051.pt",
+            (None, "ee"): "probe_4M_ee_20250225_155557.pt",
+            (None, "tm"): "probe_4M_tm_20250225_181200.pt",
+            (None, "le"): "probe_4M_le_20250225_181838.pt",
+            (None, "cne"): "probe_4M_cne_20250226_004252.pt",
+            (None, "cpm"): "probe_4M_cpm_20250226_003126.pt",
+            (None, "ct"): "probe_4M_ct_20250226_002037.pt",
+            # (None, "bw"): "probe_4M_bw_20250226_162908.pt",
+            (None, "ptm"): "probe_4M_ptm_20250226_171349.pt",
+            (None, "pee"): "probe_4M_pee_20250226_181424.pt",
+        }
+    elif model_version == "800k":
+        probe_names = {
+            "met": "probe_800k_tem_20250225_205930.pt",
+            (None, "c"): "probe_800k_cap_20250225_211044.pt",
+            (None, "l"): "probe_800k_legal_20250225_205443.pt",
+            ("pt", "pe", "pm"): "probe_800k_ptem_20250225_210508.pt",
+            (None, "ee"): "probe_800k_ee_20250225_212947.pt",
+            (None, "tm"): "probe_800k_tm_20250225_211512.pt",
+            (None, "le"): "probe_800k_le_20250225_212042.pt",
+            (None, "cne"): "probe_800k_cne_20250225_231938.pt",
+            (None, "cpm"): "probe_800k_cpm_20250225_231012.pt",
+            (None, "ct"): "probe_800k_ct_20250225_230049.pt",
+        }
+    elif model_version == "6M":
+        probe_names = {
+            (None, "c"): "probe_6M_cap_20250226_185453.pt",
+            (None, "ee"): "probe_6M_ee_20250226_195517.pt",
+            (None, "tm"): "probe_6M_tm_20250226_193647.pt",
+            (None, "le"): "probe_6M_le_20250226_194352.pt",
+            (None, "cne"): "probe_6M_cne_20250226_192345.pt",
+            (None, "cpm"): "probe_6M_cpm_20250226_191228.pt",
+            (None, "ct"): "probe_6M_ct_20250226_190107.pt",
+            ("ptm", None): "probe_6M_ptm_20250226_184808.pt",
+            (None, "pee"): "probe_6M_pee_20250226_200214.pt",
+            (None, "tnpt"): "probe_6M_tnpt_20250227_113623.pt",
+            "met": "probe_6M_tem_20250228_161558.pt",
+        }
+    elif model_version == "2M":
+        probe_names = {
+            (None, "ptm"): "probe_2M_ptm_20250227_234932.pt",
+            (None, "tm"): "probe_2M_tm_20250227_235625.pt",
+            (None, "ee"): "probe_2M_ee_20250228_001355.pt",
+            (None, "le"): "probe_2M_le_20250228_000318.pt",
+            (None, "pee"): "probe_2M_pee_20250228_002019.pt",
+            # (None, "pe"): "probe_6M_pe_20250228_185132.pt",
+            (None, "tnpt"): "probe_2M_tnpt_20250228_002635.pt",
+        }
+    else:
+        raise ValueError(f"{model_version=} not recognised when loading probes...")
 
     probes = {}
     for names, file in probe_names.items():
@@ -211,6 +229,13 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
     elif name == "awonga/othello-gpt-800k":
         size = 6
         n_layer = 4
+        n_head = 32
+        n_embd = 128
+        bias = False
+        weight_tying = False
+    elif name == "awonga/othello-gpt-2M":
+        size = 6
+        n_layer = 8
         n_head = 32
         n_embd = 128
         bias = False

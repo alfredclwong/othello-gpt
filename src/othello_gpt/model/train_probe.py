@@ -28,6 +28,7 @@ from othello_gpt.research.targets import (
     bw_target,
     ptm_target,
     prev_empty_target,
+    t_npt_target,
 )
 from othello_gpt.util import (
     LinearProbeTrainingArgs,
@@ -144,21 +145,23 @@ def pptem_target(x, device):
     return prev_tem_target(x, device, n_shift=2)
 
 runs = [
-    # ("bw", bw_target, default_args, ["boards"]),
-    # ("legal", legality_target, default_args, ["legalities"]),
+    # # ("bw", bw_target, default_args, ["boards"]),
+    # # ("legal", legality_target, default_args, ["legalities"]),
     # ("tem", theirs_empty_mine_target, default_args, ["boards"]),
-    # ("ptem", prev_tem_target, default_args, ["boards"]),
-    ("ptm", ptm_target, default_args, ["boards"]),
-    # ("pptem", pptem_target, default_args, ["boards"]),
-    ("cap", captures_target, default_args, ["flips"]),
-    ("ct", c_if_t_target, default_args, ["boards", "flips"]),
-    ("cpm", c_if_pm_target, default_args, ["boards", "flips"]),
-    ("cne", c_if_ne_target, default_args, ["boards", "flips"]),
-    ("tm", tm_target, default_args, ["boards"]),
-    ("le", l_if_e_target, default_args, ["boards", "legalities"]),
-    ("ee", empty_target, default_args, ["boards"]),
-    ("pee", prev_empty_target, default_args, ["boards"]),
-    # ("dir", flip_dir_target, default_args, ["flip_dirs"]),
+    # # ("ptem", prev_tem_target, default_args, ["boards"]),
+    # ("ptm", ptm_target, default_args, ["boards"]),
+    # # ("pptem", pptem_target, default_args, ["boards"]),
+    # ("cap", captures_target, default_args, ["flips"]),
+    # ("ct", c_if_t_target, default_args, ["boards", "flips"]),
+    # ("cpm", c_if_pm_target, default_args, ["boards", "flips"]),
+    # ("cne", c_if_ne_target, default_args, ["boards", "flips"]),
+    # ("tm", tm_target, default_args, ["boards"]),
+    # ("le", l_if_e_target, default_args, ["boards", "legalities"]),
+    # ("ee", empty_target, default_args, ["boards"]),
+    ("pe", prev_empty_target, default_args, ["boards"]),
+    # # ("dir", flip_dir_target, default_args, ["flip_dirs"]),
+    # ("tnpt", lambda x, device: t_npt_target(x, device, pad_nan=False), default_args, ["boards"]),
+    # ("tnpt_nan", t_npt_target, default_args, ["boards"]),
 ]
 
 # %%
@@ -177,15 +180,9 @@ for name, fn, args, cols in runs:
     del linear_probe
     t.cuda.empty_cache()
 
-# # %%
-# save_paths = [
-#     '/Users/alfredwong/Documents/code/othello-gpt/data/probes/probe_4M_ptem_20250226_170755.pt',
-#     '/Users/alfredwong/Documents/code/othello-gpt/data/probes/probe_4M_ptm_20250226_171349.pt'
-# ]
-
 # %%
 batch = dataset_dict["test"].take(1)
-# plot_game(batch[0])
+plot_game(batch[0])
 for (title, target_fn, _, _), save_path in zip(runs, save_paths):
     probe = t.load(save_path, map_location=device, weights_only=True)
     # save_path.unlink()

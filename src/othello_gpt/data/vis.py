@@ -41,6 +41,7 @@ def plot_game(
     title="",
     subplot_titles=None,
     annotate_moves=True,
+    return_fig=False,
 ):
     game_boards = np.array(game["boards"])
     n_moves, size, _ = game_boards.shape
@@ -147,15 +148,17 @@ def plot_game(
 
     fig.update_annotations(font_size=subplot_size // 10)
 
+    if return_fig:
+        return fig
     fig.show()
 
 
 def plot_in_basis(
     vectors: Float[t.Tensor, "n d_model"],
     probe: Float[t.Tensor, "d_model n_out"],
-    labels: List[str],
+    labels: List[str],  # len == n
     filter_by: str = "",
-    sort_by: str = "kurtosis",
+    sort_by: str = "",
     top_n: int = 0,
     title: str = "",
     n_cols: int = 5,
@@ -189,6 +192,9 @@ def plot_in_basis(
     if sort_by == "kurtosis":
         kurts = kurtosis(transformed_vectors, axis=(1, 2), fisher=False)
         sorted_indices = np.argsort(-kurts)
+    elif sort_by == "absmean":
+        absmean = transformed_vectors.abs().flatten(1).mean(1)
+        sorted_indices = np.argsort(-absmean)
     else:
         sorted_indices = np.arange(transformed_vectors.shape[0])
     if top_n != 0:

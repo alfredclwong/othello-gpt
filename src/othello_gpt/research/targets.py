@@ -72,6 +72,41 @@ def empty_target(batch, device):
     return (boards == 0).flatten(2)
 
 
+def t_npt_target(batch, device, pad_nan=True):
+    # Theirs | not previously theirs
+    # Parities are a bit of a mess. Let's get this one right:
+    # Black plays firsts in Othello, I represent B/E/W as +1/0/-1
+    # In plot_game, I use gray_r to get the correct colours which is confusing
+    # For the T/E/M transform, pos 0 of a game looks at the board state after the
+    # first move. This means that T = B, M = W. We want T = +1 and M = -1, so we
+    # flip the sign on the odd indices. Good, that's what I've been doing.
+    # (I've also previously had T = 0, E = 1, M = 2 for the classifier....!?)
+    # Note that PT/PM is the opposite. confusedjackiechan.jpg
+
+    boards = t.tensor(batch["boards"], device=device)[:, :-1]
+
+    # Prepend with initial board (BW)
+    n_batch = boards.shape[0]
+    size = boards.shape[-1]
+    initial_board = t.zeros((n_batch, 1, size, size), device=device)
+    i = size // 2 - 1
+    initial_board[:, -1, [i, i + 1], [i, i + 1]] = 1  # B
+    initial_board[:, -1, [i, i + 1], [i + 1, i]] = -1  # W
+    boards = t.cat([initial_board, boards], dim=1)
+
+    # Shift BW to TM (we flip even indices now because we prepended initial board)
+    boards[:, ::2] *= -1
+
+    # Get target
+    theirs = boards[:, 1:] == 1
+    nptheirs = boards[:, :-1] != -1
+    target = t.where(nptheirs, theirs, t.nan)
+
+    if pad_nan:
+        target[:, 0] = t.nan
+
+    return target.flatten(2)
+
 def prev_empty_target(batch, device, n_shift=1):
     e = empty_target(batch, device)
     n_batch = e.shape[0]
@@ -103,7 +138,6 @@ def bw_target(batch, device):
 
 
 def theirs_empty_mine_target(batch, device) -> Float[t.Tensor, "batch pos n_out"]:
-    # TODO switch t/m
     boards = t.tensor(batch["boards"], device=device)[:, :-1]
     boards[:, 1::2] *= -1
     boards += 1
@@ -122,7 +156,7 @@ def prev_tem_target(batch, device, n_shift=1, pad_nan=True) -> Float[t.Tensor, "
     else:
         initial_board = t.zeros((n_batch, n_shift, size, size), device=device)
         i = size // 2 - 1
-        initial_board[:, -1, [i, i + 1], [i, i + 1]] = -1
+        initial_board[:, -1, [i, i + 1], [i, i + 1]] = -1  # TODO check parity
         initial_board[:, -1, [i, i + 1], [i + 1, i]] = 1
         initial_board = initial_board.flatten(2) + 1
 

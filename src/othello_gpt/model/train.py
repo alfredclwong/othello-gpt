@@ -46,9 +46,9 @@ class HubGPT(GPT, hf.PyTorchModelHubMixin):
 cfg = GPTConfig(
     block_size=(size * size - 4) - 1,
     vocab_size=size * size - 4,  # no pad
-    n_layer=5,
+    n_layer=8,
     n_head=32,
-    n_embd=256,
+    n_embd=128,
     dropout=0.0,
     bias=False,
     weight_tying=False,
@@ -61,7 +61,7 @@ model = HubGPT(cfg).to(device)
 @dataclass
 class TransformerTrainingArgs:
     batch_size: int = 512
-    epochs: int = 16
+    epochs: int = 24
     max_steps_per_epoch: int = 1000
     lr: int = 1e-3
     weight_decay: int = 1e-3
@@ -174,10 +174,10 @@ trainer = TransformerTrainer(args, model)
 trainer.train()
 
 # %%
-model.push_to_hub("awonga/othello-gpt-800k")
+model.push_to_hub("awonga/othello-gpt-2M")
 
 # %%
-model = load_model(device, "awonga/othello-gpt-800k")
+model = load_model(device, "awonga/othello-gpt-2M")
 n_focus = 50
 focus_games = dataset_dict["test"].take(n_focus)
 focus_input_ids = t.tensor(focus_games["input_ids"], device=device)
