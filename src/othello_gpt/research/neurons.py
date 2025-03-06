@@ -39,8 +39,8 @@ size = 6
 all_squares = get_all_squares(size)
 
 # %%
-# version = "6M"
-version = "4M"
+version = "6M"
+# version = "4M"
 model = load_model(device, f"awonga/othello-gpt-{version}")
 
 # %%
@@ -51,7 +51,7 @@ probes = load_probes(
     w_e=model.W_E.T.detach(),
     # combos=["+t-m", "t+m", "+m-pt", "+t-pt", "+t-pm", "+m-pm"],
     combos=[
-        # "+t-m",
+        "+t-m",
         "+pee-ee",
     ],
     model_version=version,
@@ -71,12 +71,9 @@ w_out /= w_out.norm(dim=-1, keepdim=True)
 w_in = model.W_in[:, :n_neuron].transpose(1, 2).detach()
 w_in /= w_in.norm(dim=-1, keepdim=True)
 neurons = {
-    "w_in": w_in,
-    "w_out": w_out,
+    "w_i": w_in,
+    "w_o": w_out,
 }
-
-# %%
-model.b_K
 
 # %%
 layers = list(range(n_layer))
@@ -160,13 +157,14 @@ fig.update_layout(
 fig.show()
 
 # %%
-labels = [f"M{l} N{n}" for l in [2] for n in range(n_neuron)]
-probe_layer = 5
-# probe_name = "t-m"
+labels = [f"M{l} N{n}" for l in range(n_layer) for n in range(n_neuron)]
+probe_layer = -1
+# probe_name = "+t-m"
+probe_name = "u"
 # probe_name = "e"
 # probe_name = "+m-pe"
 # probe_name = "l"
-probe_name = "ee"
+# probe_name = "ee"
 probe = probes[probe_name][..., probe_layer]
 for s in ["pos", "neg"]:
     for n, w in neurons.items():
@@ -176,6 +174,7 @@ for s in ["pos", "neg"]:
             labels,
             top_n=20,
             title=f"{n} . {probe_name}_{probe_layer} ({s})",
+            sort_by="kurtosis",
             filter_by=s,
             n_cols=10,
         )
@@ -184,20 +183,26 @@ for s in ["pos", "neg"]:
 # TODO make fn for plotting all these together
 # TODO graph discovery
 # Show a modular neuron circuit for legality
-neuron = (-1, 140)
+# neuron = (5, 1012)
+# neuron = (5, 522)
+neuron = (5, 415)
 probe_layer = (neuron[0] + 1) * 2
 neuron_probes = {
-    "w_in": list("tem"),
-    "w_out": list("temlu"),
+    "w_i": ["ee", "+t-m", "b"],
+    "w_o": ["ee", "+t-m", "u"],
 }
 for n in neurons:
-    for p in neuron_probes[n]:
-        plot_in_basis(
-            neurons[n][*neuron].unsqueeze(0),
-            probes[p][..., probe_layer],
-            labels=[f"M{neuron[0]} N{neuron[1]} {n} . {p}{probe_layer}"],
-            n_cols=1,
-        )
+    ps = t.stack([
+        probes[p][..., probe_layer]
+        for p in neuron_probes[n]
+    ], dim=0)
+    plot_in_basis(
+        neurons[n][*neuron].unsqueeze(0),
+        ps,
+        labels=[f"{p}_L{probe_layer/2}" for p in neuron_probes[n]],
+        n_cols=len(neuron_probes[n]),
+        title=f"L{neuron[0]}N{neuron[1]} {n}",
+    )
 
 # %%
 # Show a modular neuron circuit in L0 for captures

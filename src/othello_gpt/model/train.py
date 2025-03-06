@@ -11,8 +11,10 @@ from jaxtyping import Float, Int
 from torch import Tensor
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from eindex import eindex
+import plotly.graph_objects as go
 
-from othello_gpt.data.vis import plot_game
+from othello_gpt.data.vis import plot_game, move_id_to_coord
 from othello_gpt.model.nanoGPT import GPT, GPTConfig
 from othello_gpt.util import pad_batch, get_all_squares, load_model
 # %%
@@ -46,9 +48,9 @@ class HubGPT(GPT, hf.PyTorchModelHubMixin):
 cfg = GPTConfig(
     block_size=(size * size - 4) - 1,
     vocab_size=size * size - 4,  # no pad
-    n_layer=8,
-    n_head=32,
-    n_embd=128,
+    n_layer=32,
+    n_head=8,
+    n_embd=32,
     dropout=0.0,
     bias=False,
     weight_tying=False,
@@ -174,22 +176,104 @@ trainer = TransformerTrainer(args, model)
 trainer.train()
 
 # %%
-model.push_to_hub("awonga/othello-gpt-2M")
+model.push_to_hub("awonga/othello-gpt-400k")
 
 # %%
-model = load_model(device, "awonga/othello-gpt-2M")
-n_focus = 50
+all_squares = t.tensor(get_all_squares(size), device=device)
+model = load_model(device, "awonga/othello-gpt-400k")
+n_focus = 1000
 focus_games = dataset_dict["test"].take(n_focus)
 focus_input_ids = t.tensor(focus_games["input_ids"], device=device)
 focus_logits = model(focus_input_ids[:, :-1])
-focus_logit_boards = t.full((n_focus, focus_logits.shape[1], size, size), 0.0)
-focus_logit_boards.flatten(2)[..., get_all_squares(size)] = focus_logits.detach().cpu()
+focus_logit_boards = t.full((n_focus, focus_logits.shape[1], size, size), t.nan, device=device)
+focus_logit_boards.flatten(2)[..., all_squares] = focus_logits
+focus_prob_boards = t.full_like(focus_logit_boards, t.nan)
+focus_prob_boards.flatten(2)[..., all_squares] = focus_logits.softmax(-1)
+focus_preds = focus_logits.argmax(-1)
+focus_pred_move_ids = all_squares[focus_preds]
+focus_pred_boards = t.zeros((*focus_pred_move_ids.shape, size * size), device=device)
+focus_pred_boards.scatter_(-1, focus_pred_move_ids.unsqueeze(-1), 1)
+focus_pred_boards = focus_pred_boards.view(*focus_preds.shape, size, size)
+focus_legalities = t.tensor(focus_games["legalities"], device=device)[:, 1:]
+
+# %%
+# Calculate % of predicted tokens (argmax) that are legal
+next_token_legal_by_pos = eindex(
+    focus_legalities.flatten(-2), focus_pred_move_ids, "batch pos [batch pos]"
+)
+next_token_legal_by_pos = next_token_legal_by_pos.float().mean(0).detach().cpu()
+
+# Calculate % of distribution assigned to legal moves
+legal_prob_by_pos = t.where(focus_legalities, focus_prob_boards, t.nan)
+legal_prob_by_pos = legal_prob_by_pos.flatten(-2).nansum(-1).detach().cpu()
+
+n_legal_by_pos = focus_legalities.float().flatten(-2).sum(-1).detach().cpu()
+
+fig = go.Figure()
+
+fig.add_trace(go.Scatter(
+    y=next_token_legal_by_pos,
+    name='Probability that top-1 logit is legal',
+    line=dict(color="blue"),
+))
+
+fig.add_trace(go.Scatter(
+    y=legal_prob_by_pos.mean(0).detach().cpu(),
+    name='Sum of probabilities assigned to legal moves',
+    line=dict(color="green"),
+))
+
+fig.add_trace(go.Scatter(
+    y=n_legal_by_pos.mean(0).detach().cpu(),
+    name='Number of legal moves',
+    yaxis='y2',
+    line=dict(color="red"),
+))
+
+# Add dotted lines for averages
+fig.add_trace(go.Scatter(
+    y=next_token_legal_by_pos.mean().repeat(model.cfg.n_ctx).detach().cpu(),
+    mode='lines',
+    line=dict(dash='dot', color=fig.data[0].line.color),
+    showlegend=False,
+))
+
+fig.add_trace(go.Scatter(
+    y=legal_prob_by_pos.mean().repeat(model.cfg.n_ctx).detach().cpu(),
+    mode='lines',
+    line=dict(dash='dot', color=fig.data[1].line.color),
+    showlegend=False,
+))
+
+fig.add_trace(go.Scatter(
+    y=n_legal_by_pos.mean().repeat(model.cfg.n_ctx).detach().cpu(),
+    mode='lines',
+    line=dict(dash='dot', color=fig.data[2].line.color),
+    showlegend=False,
+    yaxis='y2'
+))
+
+fig.update_layout(
+    yaxis2=dict(
+        overlaying='y',
+        side='right'
+    )
+)
+
+fig.update_layout(
+    title='Model Metrics by Position',
+    xaxis_title='Position',
+    yaxis_title='Metric Value',
+    legend=dict(orientation="h",yanchor="bottom",y=1.02,xanchor="center",x=0.5,font=dict(size=10),itemwidth=30),
+)
+
+fig.show()
 
 # %%
 test_index = 0
 test_pred_model = {
-    "boards": focus_logit_boards[test_index].detach().cpu(),
-    "legalities": focus_games[test_index]["legalities"],
+    "boards": focus_prob_boards[test_index].nan_to_num(0).detach().cpu(),
+    "legalities": focus_games[test_index]["legalities"][1:],
     "moves": focus_games[test_index]["moves"],
 }
 
@@ -200,6 +284,7 @@ plot_game(
     textcolor="red",
     hovertext=test_pred_model["boards"],
     title="Model predictions for legal moves",
+    shift_legalities=False,
 )
 
 # %%

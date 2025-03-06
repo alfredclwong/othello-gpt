@@ -41,7 +41,7 @@ size = 6
 all_squares = get_all_squares(size)
 
 # %%
-version = "4M"
+version = "1.5M"
 model = load_model(device, f"awonga/othello-gpt-{version}")
 n_layer = model.cfg.n_layers
 n_head = model.cfg.n_heads
@@ -60,7 +60,7 @@ probes = load_probes(
     w_e=model.W_E.T.detach(),
     w_p=model.W_pos.T.detach(),
     # combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
-    combos=["+pee-ee"],
+    combos=["+pe-ee"],
     model_version=version,
 )
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
@@ -140,19 +140,25 @@ for i in range(3):
 
 # %%
 # L2H5 attends to D5 strongly and pos 0 weakly, dst invariant
-# lh = (2, 5)
-lh = (1, 0)
-p = probes["tm"][:, all_squares, 4].T
+lh = (2, 5)
+# lh = (1, 0)
+# p = probes["tm"][:, all_squares, 4].T
+# pq = probes["p"][:, :, 4]
+pk = probes["+pee-ee"][:, all_squares, 4]
+# pk = probes["p"][:, :, 4]
+po = probes["ee"][:, all_squares, 4]
+pv = probes["+pee-ee"][:, all_squares, 4]
+all_squares_text = [move_id_to_text(i, size) for i in all_squares]
 # for i in [0, 1, 6, 7]:
-for i in [2]:
+for i in range(3):
     test_game = test_dataset[i]
     input_ids = t.tensor(test_game["input_ids"])
     moves = test_game["squares"][:-1]
 
     _, cache = model.run_with_cache(input_ids[:-1])
     x = cache[f"blocks.{lh[0]}.ln1.hook_normalized"][0]
-    a = (x @ model.QK[*lh] @ x.transpose(-1, -2)).AB
-    v = (p @ model.OV[*lh] @ x.transpose(-1, -2)).AB
+    a = (x @ model.QK[*lh] @ pk).AB
+    v = (po.T @ model.OV[*lh] @ pv).AB
     # Apply an attn mask to a
     attn_mask = t.tril(t.ones(a.shape[-2:], device=a.device, dtype=bool))
     a = t.where(attn_mask, a, -t.inf)
@@ -165,7 +171,8 @@ for i in [2]:
             # z=cache[f"blocks.{lh[0]}.attn.hook_pattern"][0, lh[1]].detach().cpu(),
             # z=cache[f"blocks.{lh[0]}.attn.hook_attn_scores"][0, lh[1]].detach().cpu(),
             y=moves,
-            x=moves,
+            x=all_squares_text,
+            # x=list(range(model.cfg.n_ctx)),
             colorscale="gray",
         ),
         row=1, col=1,
@@ -173,8 +180,8 @@ for i in [2]:
     fig.add_trace(
         go.Heatmap(
             z=v.detach().cpu(),
-            y=[move_id_to_text(i, size) for i in all_squares],
-            x=moves,
+            y=all_squares_text,
+            x=all_squares_text,
             colorscale="gray",
         ),
         row=1, col=2,

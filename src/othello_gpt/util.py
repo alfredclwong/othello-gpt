@@ -20,9 +20,9 @@ PAD_TOKEN = -1
 class LinearProbeTrainingArgs:
     n_epochs: int = 6
     lr: float = 1e-3
-    batch_size: int = 256
+    batch_size: int = 128
     n_steps_per_epoch: int = 200
-    n_test: int = 1000
+    n_test: int = 200
     betas: tuple[float, float] = (0.9, 0.99)
     weight_decay: float = 1e-3
     use_wandb: bool = True
@@ -106,7 +106,7 @@ def load_probes(
             (None, "cpm"): "probe_6M_cpm_20250226_191228.pt",
             (None, "ct"): "probe_6M_ct_20250226_190107.pt",
             ("ptm", None): "probe_6M_ptm_20250226_184808.pt",
-            (None, "pee"): "probe_6M_pee_20250226_200214.pt",
+            (None, "pe"): "probe_6M_pee_20250226_200214.pt",
             (None, "tnpt"): "probe_6M_tnpt_20250227_113623.pt",
             "met": "probe_6M_tem_20250228_161558.pt",
         }
@@ -116,9 +116,16 @@ def load_probes(
             (None, "tm"): "probe_2M_tm_20250227_235625.pt",
             (None, "ee"): "probe_2M_ee_20250228_001355.pt",
             (None, "le"): "probe_2M_le_20250228_000318.pt",
-            (None, "pee"): "probe_2M_pee_20250228_002019.pt",
-            # (None, "pe"): "probe_6M_pe_20250228_185132.pt",
+            (None, "pe"): "probe_2M_pee_20250228_002019.pt",
             (None, "tnpt"): "probe_2M_tnpt_20250228_002635.pt",
+        }
+    elif model_version == "1.5M":
+        probe_names = {
+            "met": "probe_1.5M_tem_20250304_223504.pt",
+            (None, "tm"): "probe_1.5M_tm_20250304_224025.pt",
+            (None, "ee"): "probe_1.5M_ee_20250304_225308.pt",
+            (None, "le"): "probe_1.5M_le_20250304_224547.pt",
+            (None, "pe"): "probe_1.5M_pe_20250304_225849.pt",
         }
     else:
         raise ValueError(f"{model_version=} not recognised when loading probes...")
@@ -238,6 +245,20 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
         n_layer = 8
         n_head = 32
         n_embd = 128
+        bias = False
+        weight_tying = False
+    elif name == "awonga/othello-gpt-1.5M":
+        size = 6
+        n_layer = 30
+        n_head = 8
+        n_embd = 64
+        bias = False
+        weight_tying = True
+    elif name == "awonga/othello-gpt-400k":
+        size = 6
+        n_layer = 32
+        n_head = 8
+        n_embd = 32
         bias = False
         weight_tying = False
     else:

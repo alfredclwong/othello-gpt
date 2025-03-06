@@ -6,6 +6,7 @@ opponent = {1: -1, -1: 1}
 
 
 def get_max_moves(size: int) -> int:
+    # TODO no passes => half the size
     return (size * size - 4) * 2  # Upper bound assuming one player only passes
 
 

@@ -155,7 +155,7 @@ def plot_game(
 
 def plot_in_basis(
     vectors: Float[t.Tensor, "n d_model"],
-    probe: Float[t.Tensor, "d_model n_out"],
+    probe: Float[t.Tensor, "n_probe d_model n_out"],
     labels: List[str],  # len == n
     filter_by: str = "",
     sort_by: str = "",
@@ -163,18 +163,20 @@ def plot_in_basis(
     title: str = "",
     n_cols: int = 5,
 ):
-    # TODO support n_probe
     # transform data vectors, e.g. neuron w_outs to a different basis, e.g. probe and visualise
+    if len(probe.shape) == 2:
+        probe = probe.unsqueeze(0)
+
     probe = einops.rearrange(
         probe,
-        "d_model (row col) -> d_model row col",
+        "n_probe d_model (row col) -> n_probe d_model row col",
         row=int(probe.shape[-1] ** 0.5),
     )
     transformed_vectors = einops.einsum(
         vectors,
         probe,
-        "n d_model, d_model row col -> n row col",
-    ).cpu()
+        "n d_model, n_probe d_model row col -> n n_probe row col",
+    ).flatten(0, 1).cpu()
 
     abs_max_indices = transformed_vectors.flatten(1).abs().max(dim=1)[1]
     abs_max_sign = t.sign(

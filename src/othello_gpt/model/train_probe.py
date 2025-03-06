@@ -60,7 +60,7 @@ device = t.device(
 )
 
 # %%
-model_version = "6M"
+model_version = "1.5M"
 model = load_model(device, f"awonga/othello-gpt-{model_version}")
 
 # %%
@@ -147,7 +147,7 @@ def pptem_target(x, device):
 runs = [
     # # ("bw", bw_target, default_args, ["boards"]),
     # # ("legal", legality_target, default_args, ["legalities"]),
-    # ("tem", theirs_empty_mine_target, default_args, ["boards"]),
+    ("tem", theirs_empty_mine_target, default_args, ["boards"]),
     # # ("ptem", prev_tem_target, default_args, ["boards"]),
     # ("ptm", ptm_target, default_args, ["boards"]),
     # # ("pptem", pptem_target, default_args, ["boards"]),
@@ -155,9 +155,9 @@ runs = [
     # ("ct", c_if_t_target, default_args, ["boards", "flips"]),
     # ("cpm", c_if_pm_target, default_args, ["boards", "flips"]),
     # ("cne", c_if_ne_target, default_args, ["boards", "flips"]),
-    # ("tm", tm_target, default_args, ["boards"]),
-    # ("le", l_if_e_target, default_args, ["boards", "legalities"]),
-    # ("ee", empty_target, default_args, ["boards"]),
+    ("tm", tm_target, default_args, ["boards"]),
+    ("le", l_if_e_target, default_args, ["boards", "legalities"]),
+    ("ee", empty_target, default_args, ["boards"]),
     ("pe", prev_empty_target, default_args, ["boards"]),
     # # ("dir", flip_dir_target, default_args, ["flip_dirs"]),
     # ("tnpt", lambda x, device: t_npt_target(x, device, pad_nan=False), default_args, ["boards"]),
@@ -197,5 +197,18 @@ for (title, target_fn, _, _), save_path in zip(runs, save_paths):
         index=0,
         title=title,
     )
+
+# %%
+target_fn = lambda x, device: theirs_empty_mine_target(x, device).reshape(-1, model.cfg.n_ctx, size, size)
+plot_game(
+    {
+        "boards": target_fn(batch, device)[0].detach().cpu(),
+        "legalities": batch[0]["legalities"][1:],
+        "moves": batch[0]["moves"],
+    },
+    reversed=False,
+    shift_legalities=False,
+    title="Theirs/empty/mine (TEM) board states"
+)
 
 # %%
