@@ -35,6 +35,7 @@ from othello_gpt.research.targets import (
     empty_target,
     prev_empty_target,
     t_npt_target,
+    move_target,
 )
 from othello_gpt.util import (
     get_all_squares,
@@ -54,7 +55,16 @@ wandb.login()
 
 size = 6
 all_squares = get_all_squares(size)
-actually_all_squares = list(range(size*size))
+actually_all_squares = list(range(size * size))
+corners = [0, size - 1, size * (size - 1), size * size - 1]
+non_corners = [i for i in range(size * size) if i not in corners]
+edges = [
+    y * size + x
+    for y in range(size)
+    for x in range(size)
+    if x * y == 0 or x == size - 1 or y == size - 1
+]
+non_edges = [i for i in range(size * size) if i not in edges]
 dataset_dict = load_dataset("awonga/othello-gpt")
 n_test = 1000
 test_dataset = dataset_dict["test"].take(n_test)
@@ -75,7 +85,7 @@ model
 
 # %%
 padded_W_pos = t.full((size * size, model.W_pos.shape[1]), t.nan, device=device)
-padded_W_pos[:model.W_pos.shape[0], :] = model.W_pos
+padded_W_pos[: model.W_pos.shape[0], :] = model.W_pos
 probes = load_probes(
     probe_dir,
     device,
@@ -85,9 +95,12 @@ probes = load_probes(
     combos=[
         "+t-m",
         "+e+e-t-m",
-        "+pe-ee",
+        "+pee-ee",
+        "+pe-e",
+        "+pt-pm",
+        "+pt-pm+c",
         # "+b+ee",
-        "+le+ee",
+        # "+le+ee",
         # "+cpm-ptm-pee+ee",  # TODO properly realign cpm to pm
         # "+cpm-ptm",
         # "+tnpt-ptm",
@@ -96,21 +109,31 @@ probes = load_probes(
         # "+pe-ee+tm",
         # "+pe-ee+pee",  # ppee
         # "+pe-e",
+        # "+c+mov",
     ],
     model_version=version,
 )
+
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
+
+# %%
+colors = dict(
+    zip(
+        [*probes.keys(), "tem", "ptem"],
+        px.colors.qualitative.Light24 + px.colors.qualitative.Dark24,
+    )
+)
 
 # %%
 probe_layer = model.cfg.n_layers * 2 + 1 - 6
 # probe_layer = 3
 # Probe W_E (I expect to see captures!)
-top_left_squares = [y*size+x for y in range(size//2) for x in range(size//2)]
+top_left_squares = [y * size + x for y in range(size // 2) for x in range(size // 2)]
 top_left_squares = [i for i in top_left_squares if i in all_squares]
-labels = [move_id_to_text(i, size) for i in top_left_squares]
+# labels = [move_id_to_text(i, size) for i in top_left_squares]
+labels = [move_id_to_text(i, size) for i in actually_all_squares]
 # for k in ["ee", "tm", "ptm", "le", "+pee-ee", "tnpt"]:
-# for k in ["tm", "+pee-ee", "+t-m", "+pee-e"]:
-for k in ["ee", "+t-m"]:
+for k in ["+t-m", "ee", "+pee-ee", "pee"]:
     plot_in_basis(
         # project(
         #     probes["b"][..., 0].nan_to_num(),
@@ -120,12 +143,14 @@ for k in ["ee", "+t-m"]:
         #     probes["tm"][..., 8],
         #     probes["+pee-ee"][..., 8],
         # )[0],
-        probes["b"][..., top_left_squares, 0].T,
+        # probes["b"][..., top_left_squares, 0].T,
+        probes["b"][..., actually_all_squares, 0].T,
         probes[k][..., probe_layer],
         # probes[k][..., 0],
         labels=labels,
-        title=f"W_E in {k} L{probe_layer/2} probe basis",
-        n_cols=size//2,
+        title=f"W_E in {k} L{probe_layer / 2} probe basis",
+        # n_cols=size // 2,
+        n_cols=size,
     )
 
 # %%
@@ -146,8 +171,8 @@ for k in ["ee", "+t-m"]:
         probes[k][..., probe_layer],
         # probes[k][..., 0],
         labels=labels,
-        title=f"W_U in {k} L{probe_layer/2} probe basis",
-        n_cols=size//2,
+        title=f"W_U in {k} L{probe_layer / 2} probe basis",
+        n_cols=size // 2,
     )
 
 # %%
@@ -158,7 +183,7 @@ for k in [
     "p",
 ]:
     if k == "p":
-        probe = probes["p"][..., :model.cfg.n_ctx, 0].T
+        probe = probes["p"][..., : model.cfg.n_ctx, 0].T
         n_cols = 8
     else:
         probe = probes["p"][..., top_left_squares, 0].T
@@ -167,20 +192,32 @@ for k in [
         probe,
         probes[k][..., probe_layer],
         labels=[f"{i}." for i in range(size * size)],
-        title=f"W_P in {k} L{probe_layer/2} probe basis",
+        title=f"W_P in {k} L{probe_layer / 2} probe basis",
         n_cols=n_cols,
     )
 
 # %%
+for k in ["mov", "c"]:
+    plot_in_basis(
+        probes["mov"][..., top_left_squares, 3].T,
+        probes[k][..., 3],
+        labels=labels,
+        title=f"mov . {k}",
+        n_cols=size // 2,
+    )
+
+# %%
 # Combine all probes into a single tensor for t-SNE transformation
-all_layers = list(range(probes["ee"].shape[-1]))
+all_layers = list(range(2, probes["ee"].shape[-1]))
 tsne_probes = [
-    ("ee", actually_all_squares, all_layers),
-    ("pe", all_squares, all_layers),
-    ("+pe-ee", all_squares, all_layers),
-    ("le", all_squares, all_layers),
+    ("ee", all_squares, all_layers),
+    # ("pee", all_squares, all_layers),
+    # ("+pee-ee", all_squares, all_layers),
+    # ("le", all_squares, all_layers),
     ("+t-m", actually_all_squares, all_layers),
     # ("tm", actually_all_squares, all_layers),
+    ("c", non_corners, all_layers),
+    ("mov", all_squares, all_layers),
     # ("ptm", actually_all_squares, all_layers),
     # ("tnpt", actually_all_squares, all_layers),
     # ("b", all_squares, [0]),
@@ -198,7 +235,7 @@ tsne_probes_cat = (
 )
 
 # Perform t-SNE projection
-tsne = TSNE(n_components=2, random_state=1899)
+tsne = TSNE(n_components=2, random_state=0)
 probes_2d = tsne.fit_transform(tsne_probes_cat.T)
 
 # Reshape the projected data back to the original probe shapes
@@ -211,20 +248,7 @@ for k, squares, layers in tsne_probes:
     )
     start_idx = end_idx
 
-# Plot the t-SNE projections in subplots per square
-colors = {
-    "ee": "red",
-    "pe": "green",
-    "+pe-ee": "blue",
-    "le": "purple",
-    "+t-m": "yellow",
-    # "tm": "orange",
-    # "ptm": "black",
-    # "tnpt": "brown",
-    # "b": "magenta",
-    # "u": "cyan",
-}
-
+# %%
 fig = make_subplots(
     rows=size,
     cols=size,
@@ -251,16 +275,16 @@ for k, squares, layers in tsne_probes:
             row=y + 1,
             col=x + 1,
         )
-
 fig.update_xaxes(matches="x")
 fig.update_yaxes(matches="y")
-
+fig.for_each_trace(lambda trace: trace.update(showlegend=False) if trace.legendgroup else None)
+fig.for_each_trace(lambda trace: trace.update(showlegend=True) if trace.legendgroup and not any(t.showlegend for t in fig.data if t.legendgroup == trace.legendgroup and t != trace) else None)
 fig.update_layout(height=1800, width=1800, title_text="t-SNE Projection of Probes")
 fig.show()
 
 # %%
 # Find % of residual stream variance explained by each probe direction
-input_ids = t.tensor(test_dataset["input_ids"][:200], device=device)
+input_ids = t.tensor(test_dataset["input_ids"][:100], device=device)
 _, cache = model.run_with_cache(input_ids[:, :-1])
 X, y_labels = cache.get_full_resid_decomposition(
     apply_ln=True, return_labels=True, expand_neurons=False
@@ -286,9 +310,6 @@ def calculate_explained_var(
 
     # Add a small regularisation term to b to perturb it
     b += 1e-6 * t.randn_like(b)
-
-    # Use QR decomposition rather than SVD for numerical stability
-    Q, _ = t.linalg.qr(b)  # Q will be orthonormal.
 
     # Perform SVD on the basis vectors to get an orthonormal basis
     U, S, _ = t.linalg.svd(b, full_matrices=False)
@@ -320,62 +341,59 @@ def calculate_explained_var(
     return explained_variance
 
 # %%
-corners = [0, size - 1, size * (size - 1), size * size - 1]
-non_corners = [i for i in range(size * size) if i not in corners]
-edges = [
-    y * size + x
-    for y in range(size)
-    for x in range(size)
-    if x * y == 0 or x == size - 1 or y == size - 1
-]
-non_edges = [i for i in range(size * size) if i not in edges]
+# basis_keys = [
+#     *[
+#         (k, i, move_id_to_text(i, size), probe_layer)
+#         for k, ids, probe_layer in [
+#             # ("ee", [27], 5),
+#             # ("ee", all_squares, 5),
+#             ("u", all_squares, 5),
+#             # ("tm", actually_all_squares, 6),
+#         ]
+#         for i in ids
+#     ],
+#     # *[(k, 27, k, 10) for k in ["ee", "tm", "ptm", "le", "+pee-ee", "tnpt"]],
+# ]
+# basis_probes = {
+#     f"{k}_{label}": probes[k][:, [i], probe_layer]
+#     for k, i, label, probe_layer in basis_keys
+# }
 
 basis_keys = [
-    *[
-        (k, i, move_id_to_text(i, size), probe_layer)
-        for k, ids, probe_layer in [
-            ("ee", all_squares, 5),
-            # ("tm", actually_all_squares, 6),
-        ]
-        for i in ids
-    ],
-    # *[(k, 27, k, 10) for k in ["ee", "tm", "ptm", "le", "+pee-ee", "tnpt"]],
+    # ("tnpt", non_corners, 4),
+    # # ("+tnpt-ptm", non_corners, 4),
+    # # ("+cpm-ptm", non_corners, 4),
+    ("ee", all_squares, 5),
+    ("+t-m", actually_all_squares, 12),
+    ("c", non_corners, 12),
+    ("mov", all_squares, 6),
+    # ("ptm", non_edges, 6),
+    ("u", all_squares, -2),
+    # # ("+le+ee", all_squares, -2),
+    # # ("+pee-ee", all_squares, 5),
+    # # ("b", all_squares, 0),
+    # ("u", all_squares, 0),
+    ("pr", list(range(10)), 0),
+
+    # ("ee", actually_all_squares, 5),
+    # ("tm", actually_all_squares, 6),
+    # ("pee", actually_all_squares, 5),
+    # ("ptm", actually_all_squares, 6),
+    # ("+pee-ee", actually_all_squares, 5),
+    # ("tnpt", actually_all_squares, 4),
+    # ("+tnpt-ptm", actually_all_squares, 4),
+    # ("c", actually_all_squares, 6),
+    # ("+cpm-ptm", actually_all_squares, 4),
+    # ("le", actually_all_squares, -2),
+    # ("+le+ee", actually_all_squares, -2),
+    # ("p", list(range(31)), 0),
+    # ("b", all_squares, 0),
+    # ("u", all_squares, 0),
 ]
 basis_probes = {
-    f"{k}_{label}": probes[k][:, [i], probe_layer]
-    for k, i, label, probe_layer in basis_keys
+    k: probes[k][:, squares, probe_layer]
+    for k, squares, probe_layer in basis_keys
 }
-
-# basis_keys = [
-#     # ("tnpt", non_corners, 4),
-#     # # ("+tnpt-ptm", non_corners, 4),
-#     # # ("+cpm-ptm", non_corners, 4),
-    # ("ee", all_squares, 5),
-#     # ("tm", non_edges, 6),
-#     # ("ptm", non_edges, 6),
-#     # ("le", all_squares, -2),
-#     # # ("+le+ee", all_squares, -2),
-#     # # ("+pee-ee", all_squares, 5),
-#     # # ("b", all_squares, 0),
-#     # ("u", all_squares, 0),
-#     # # ("p", all_squares, 0),
-
-#     ("ee", actually_all_squares, 5),
-#     ("tm", actually_all_squares, 6),
-#     ("pee", actually_all_squares, 5),
-#     ("ptm", actually_all_squares, 6),
-#     ("+pee-ee", actually_all_squares, 5),
-#     ("tnpt", actually_all_squares, 4),
-#     ("+tnpt-ptm", actually_all_squares, 4),
-#     ("c", actually_all_squares, 6),
-#     ("+cpm-ptm", actually_all_squares, 4),
-#     ("le", actually_all_squares, -2),
-#     ("+le+ee", actually_all_squares, -2),
-#     ("p", list(range(31)), 0),
-#     ("b", all_squares, 0),
-#     ("u", all_squares, 0),
-# ]
-# basis_probes = {k: probes[k][:, squares, probe_layer] for k, squares, probe_layer in basis_keys}
 # basis_probes["r"] = t.randn((256, 128), device=device)
 
 print({k: p.shape for k, p in basis_probes.items()})
@@ -384,6 +402,14 @@ probe_bases = t.cat(list(basis_probes.values()), dim=1)
 probe_dims = {k: p.shape[1] for k, p in basis_probes.items()}
 print(probe_dims)
 print(X.shape, probe_bases.shape)
+
+# %%
+[
+    calculate_explained_var(X, probe_bases)
+    for X in [
+        model.W_E, model.W_U.T, model.W_pos,
+    ]
+]
 
 # %%
 fig = make_subplots(
@@ -396,10 +422,12 @@ probe_l = 0
 for i, k in enumerate(basis_probes):
     probe_r = probe_l + probe_dims[k]
     v = calculate_explained_var(X.transpose(0, 1), probe_bases[:, probe_l:probe_r])
-    v_cum = calculate_explained_var(X_cum.transpose(0, 1), probe_bases[:, probe_l:probe_r])
+    v_cum = calculate_explained_var(
+        X_cum.transpose(0, 1), probe_bases[:, probe_l:probe_r]
+    )
     assert v.shape[0] == len(y_labels) and v_cum.shape[0] == len(y_cum_labels)
     fig.add_trace(
-        go.Heatmap( 
+        go.Heatmap(
             z=v.detach().cpu(),
             y=y_labels,
             colorscale="gray",
@@ -422,8 +450,8 @@ for i, k in enumerate(basis_probes):
         row=i + 1,
         col=2,
     )
-    fig.update_xaxes(title_text="pos", row=i+1, col=1)
-    fig.update_xaxes(title_text="pos", row=i+1, col=2)
+    fig.update_xaxes(title_text="pos", row=i + 1, col=1)
+    fig.update_xaxes(title_text="pos", row=i + 1, col=2)
     probe_l = probe_r
 fig.update_layout(
     title_text="Variance Explained by Each Probe Direction",
@@ -434,7 +462,9 @@ fig.show()
 
 orthogonal_vars = calculate_explained_var(X.transpose(0, 1), probe_bases)
 orthogonal_cum_vars = calculate_explained_var(X_cum.transpose(0, 1), probe_bases)
-assert orthogonal_vars.shape[0] == len(y_labels) and orthogonal_cum_vars.shape[0] == len(y_cum_labels)
+assert orthogonal_vars.shape[0] == len(y_labels) and orthogonal_cum_vars.shape[
+    0
+] == len(y_cum_labels)
 fig = make_subplots(rows=1, cols=2, subplot_titles=["decomp", "cum"])
 fig.add_trace(
     go.Heatmap(
@@ -443,6 +473,7 @@ fig.add_trace(
         colorscale="gray",
         zmin=0,
         zmax=1,
+        showscale=False,
     ),
     row=1,
     col=1,
@@ -454,13 +485,18 @@ fig.add_trace(
         colorscale="gray",
         zmin=0,
         zmax=1,
+        showscale=False,
     ),
     row=1,
     col=2,
 )
 fig.update_xaxes(title_text="pos", row=1, col=1)
 fig.update_xaxes(title_text="pos", row=1, col=2)
+fig.update_layout(
+    margin=dict(l=10, r=10, t=30, b=10),
+)
 fig.show()
+
 
 # %%
 # For ptm[:, non_edges], u[:, all_squares], there are some interesting cross colinearities
@@ -468,27 +504,30 @@ fig.show()
 def calculate_pairwise_colinearity(bases: Float[t.Tensor, "d_model basis"]):
     # Normalize the basis vectors
     normalized_bases = bases / bases.norm(dim=0, keepdim=True)
-    
+
     # Calculate the dot product between each pair of basis vectors
     colinearity_matrix = t.matmul(normalized_bases.T, normalized_bases)
-    
+
     return colinearity_matrix
+
 
 threshold = 0.1
 probe_layer = model.cfg.n_layers * 2 + 1 - 6
 # probe_layer = 0
 # colinear_keys = ["c", "ee", "tm", "le", "ptm", "pee", "tnpt", "m", "e", "t", "u", "b", "p", "+t-m", "+pee-ee", "+le+ee"]
-# colinear_keys = ["e", "+t-m", "+pe-ee", "b", "p", "u"]
-colinear_keys = ["ee", "+t-m", "b", "p", "u"]
+colinear_keys = ["ee", "+t-m", "c", "mov", "b", "u", "p", "pr"]
 colinear_probes = t.cat([probes[k][..., probe_layer] for k in colinear_keys], dim=-1)
 colinearity_matrix = calculate_pairwise_colinearity(colinear_probes)
 colinearity_matrix = t.tril(colinearity_matrix)
-colinearity_matrix = t.where(colinearity_matrix.abs() > threshold, colinearity_matrix, 0)
+colinearity_matrix = t.where(
+    colinearity_matrix.abs() > threshold, colinearity_matrix, 0
+)
 probe_suffixes = {
     k: [
-        f"{i if k == 'p' else move_id_to_text(i, size)}"
-        for i in (range(model.cfg.n_ctx) if k == "p" else actually_all_squares)
-    ] for k in colinear_keys
+        f"{i if k in ['p', 'pr'] else move_id_to_text(i, size)}"
+        for i in actually_all_squares
+    ]
+    for k in colinear_keys
 }
 probe_bases_labels = [f"{k}_{s}" for k in colinear_keys for s in probe_suffixes[k]]
 line_indices = np.array([len(probe_suffixes[k]) for k in colinear_keys]).cumsum()
@@ -506,7 +545,7 @@ fig.update_yaxes(
     autorange="reversed",
 )
 fig.update_layout(
-    title=f"Probe Colinearity Heatmap at L{probe_layer/2} (threshold {threshold})",
+    title=f"Probe Colinearity Heatmap at L{probe_layer / 2} (threshold {threshold})",
     xaxis=dict(title="Basis Vectors"),
     yaxis=dict(title="Basis Vectors"),
     height=len(colinear_keys) * 200,
@@ -519,8 +558,10 @@ fig.update_layout(
             x1=i - 0.5,
             y1=len(probe_bases_labels) - 0.5,
             line=dict(color="black", width=1),
-        ) for i in line_indices
-    ] + [
+        )
+        for i in line_indices
+    ]
+    + [
         dict(
             type="line",
             x0=-0.5,
@@ -530,7 +571,7 @@ fig.update_layout(
             line=dict(color="black", width=1),
         )
         for i in line_indices
-    ]
+    ],
 )
 
 fig.show()
@@ -552,14 +593,21 @@ linear_probe_tem = t.stack([probes["m"], probes["e"], probes["t"]], dim=-2)
 linear_probe_m = t.stack([-probes["m"], probes["m"]], dim=-2)
 linear_probe_e = t.stack([-probes["e"], probes["e"]], dim=-2)
 linear_probe_t = t.stack([-probes["t"], probes["t"]], dim=-2)
+linear_probe_ptem = t.stack([probes["pm"], probes["pe"], probes["pt"]], dim=-2)
+linear_probe_cap = t.stack([-probes["c"], probes["c"]], dim=-2)
+linear_probe_mov = t.stack([-probes["mov"], probes["mov"]], dim=-2)
+linear_probe_pm = t.stack([-probes["pm"], probes["pm"]], dim=-2)
+linear_probe_pe = t.stack([-probes["pe"], probes["pe"]], dim=-2)
+linear_probe_pt = t.stack([-probes["pt"], probes["pt"]], dim=-2)
 linear_probe_t_m = t.stack([-probes["+t-m"], probes["+t-m"]], dim=-2)
+linear_probe_pt_pm = t.stack([-probes["+pt-pm"], probes["+pt-pm"]], dim=-2)
 linear_probe_ee = t.stack([-probes["ee"], probes["ee"]], dim=-2)
 linear_probe_tm = t.stack([-probes["tm"], probes["tm"]], dim=-2)
 linear_probe_le = t.stack([-probes["le"], probes["le"]], dim=-2)
 # linear_probe_lee = t.stack([-probes["+le+ee"], probes["+le+ee"]], dim=-2)
 # linear_probe_ptm = t.stack([-probes["ptm"], probes["ptm"]], dim=-2)
-linear_probe_pe = t.stack([-probes["pe"], probes["pe"]], dim=-2)
-# linear_probe_peeee = t.stack([-probes["+pee-ee"], probes["+pee-ee"]], dim=-2)
+linear_probe_pee = t.stack([-probes["pee"], probes["pee"]], dim=-2)
+linear_probe_pee_ee = t.stack([-probes["+pee-ee"], probes["+pee-ee"]], dim=-2)
 # linear_probe_tnpt = t.stack([-probes["tnpt"], probes["tnpt"]], dim=-2)
 linear_probe_eetm = t.stack([-probes["+e+e-t-m"], probes["+e+e-t-m"]], dim=-2)
 
@@ -568,7 +616,7 @@ linear_probe_eetm = t.stack([-probes["+e+e-t-m"], probes["+e+e-t-m"]], dim=-2)
 #         -probes["+pee-ee+tm"],
 #         probes["+pee-ee+tm"],
 #     ],
-#     dim=-2,black 
+#     dim=-2,black
 # )
 # linear_probe_combo2 = t.stack(
 #     [
@@ -580,44 +628,65 @@ linear_probe_eetm = t.stack([-probes["+e+e-t-m"], probes["+e+e-t-m"]], dim=-2)
 
 pptem_target = lambda x, device: prev_tem_target(x, device, n_shift=2)
 
-colors = {
-    key: px.colors.qualitative.Light24[i]
-    for i, key in enumerate([*probes.keys(), "tem"])
-}
-
 # %%
 probe_targets = [
-    ("tem", linear_probe_tem, theirs_empty_mine_target),
-    (
-        "m",
-        linear_probe_m,
-        lambda x, device: (theirs_empty_mine_target(x, device) == 0).int(),
-    ),
-    (
-        "e",
-        linear_probe_e,
-        lambda x, device: (theirs_empty_mine_target(x, device) == 1).int(),
-    ),
-    (
-        "t",
-        linear_probe_t,
-        lambda x, device: (theirs_empty_mine_target(x, device) == 2).int(),
-    ),
+    # ("tem", linear_probe_tem, theirs_empty_mine_target),
+    # (
+    #     "m",
+    #     linear_probe_m,
+    #     lambda x, device: (theirs_empty_mine_target(x, device) == 0).int(),
+    # ),
+    # (
+    #     "e",
+    #     linear_probe_e,
+    #     lambda x, device: (theirs_empty_mine_target(x, device) == 1).int(),
+    # ),
+    # (
+    #     "t",
+    #     linear_probe_t,
+    #     lambda x, device: (theirs_empty_mine_target(x, device) == 2).int(),
+    # ),
+    # ("ptem", linear_probe_ptem, prev_tem_target),
+    # (
+    #     "pm",
+    #     linear_probe_pm,
+    #     lambda x, device: (prev_tem_target(x, device) == 0).int(),
+    # ),
+    # (
+    #     "pe",
+    #     linear_probe_pe,
+    #     lambda x, device: (prev_tem_target(x, device) == 1).int(),
+    # ),
+    # (
+    #     "pt",
+    #     linear_probe_pt,
+    #     lambda x, device: (prev_tem_target(x, device) == 2).int(),
+    # ),
     # ("t|!e", linear_probe_t, tm_target),
     # ("+e+e-t-m", linear_probe_eetm, empty_target),
-    # ("ee", linear_probe_ee, empty_target),
-    # ("+t-m", linear_probe_t_m, tm_target),
+    ("ee", linear_probe_ee, empty_target),
+    ("+t-m", linear_probe_t_m, tm_target),
+    # ("+pt-pm", linear_probe_pt_pm, ptm_target),
     # ("tm", linear_probe_tm, tm_target),
-    # ("pe", linear_probe_pe, prev_empty_target),
+    # ("pee", linear_probe_pe, prev_empty_target),
     # ("l|e", linear_probe_le, l_if_e_target),
+    # ("c", linear_probe_cap, captures_target),
+    # ("ce", linear_probe_ce, lambda x, device: captures_target(x, device, include_move=True)),
+    # ("+pee-ee", linear_probe_pee_ee, move_target),
+    # ("mov", linear_probe_mov, move_target),
+    # ("+c+mov", linear_probe_cmov, lambda x, device: captures_target(x, device, include_move=True)),
 ]
 
 probe_accuracies = {}
 probe_losses = {}
 labels = []
 for name, probe, target_fn in tqdm(probe_targets):
-    test_y: Float[t.Tensor, "n_test pos n_out"] = target_fn(test_dataset, device).float()
-    test_y[:, -1] = t.nan
+    test_y: Float[t.Tensor, "n_test pos n_out"] = target_fn(
+        test_dataset, device
+    ).float()
+    if name[0] == "p":
+        test_y[:, 0] = t.nan  # skip the first position in "prev" probes
+    test_y[:, -1] = t.nan  # skip the last position as this is empty-only
     test_loss, test_accs, labels = test_linear_probe(
         model,
         device,
@@ -654,9 +723,7 @@ for name in probe_accuracies:
         ),
     )
 
-fig.update_layout(
-    height=600, width=600, title_text="Probe Test Accuracy by Layer"
-)
+fig.update_layout(height=600, width=600, title_text="Probe Test Accuracy by Layer")
 fig.show()
 
 # %%
@@ -664,12 +731,16 @@ batch = dataset_dict["test"].take(1)
 plot_game(batch[0])
 # TODO test_loss.argmax() for probe_layer
 preds = [
-    (linear_probe_tem, theirs_empty_mine_target, "TEM probe", -6),
-    # (linear_probe_cap, captures_target, "Captures probe", 4),
+    # (linear_probe_tem, theirs_empty_mine_target, "TEM probe", -6),
+    # (linear_probe_ptem, captures_target, "PTEM probe", -6),
+    # (linear_probe_cap, captures_target, "Captures probe", -7),
     # (linear_probe_ptm, ptm_target, "PT-PM probe", -6),
     # (linear_probe_tm, tm_target, "T-M probe", -6),
-    # (linear_probe_ee, empty_target, "Empty probe", 3),
-    # (linear_probe_pe, prev_empty_target, "Previously empty probe", 5)
+    (linear_probe_ee, empty_target, "Empty probe", 3),
+    # (linear_probe_pm, lambda x, device: prev_tem_target(x, device) == 0, "Previously mine probe", 5),
+    (linear_probe_pe, prev_empty_target, "Previously empty probe", 3),
+    # (linear_probe_pt, lambda x, device: prev_tem_target(x, device) == 2, "Previously theirs probe", 5),
+    # (linear_probe_pt_pm, ptm_target, "PT-PM probe", 5),
     # (linear_probe_le, l_if_e_target, "L if E probe", -2),
     # (linear_probe_tnpt, t_npt_target, "T|NPT probe", 4),
     # (linear_probe_combo, ptm_target, "PE-E+TM probe", 4),
@@ -685,9 +756,16 @@ preds = [
     #     (linear_probe_tm, tm_target, f"T-M probe L{i}", i)
     #     for i in range(linear_probe_tm.shape[-1])
     # ],
+    # (linear_probe_mov, move_target, "Move probe", 2),
     # *[
-    #     (linear_probe_peeee, empty_target, f"+PEE-EE probe L{i}", i)
-    #     for i in range(linear_probe_tm.shape[-1])
+    #     (linear_probe_pee_ee, move_target, f"+PEE-EE probe L{i}", i)
+    #     # for i in range(linear_probe_tm.shape[-1])
+    #     for i in [2]
+    # ],
+    # *[
+    #     (linear_probe_pe_ee, move_target, f"+PE-EE probe L{i}", i)
+    #     # for i in range(linear_probe_tm.shape[-1])
+    #     for i in [2]
     # ],
 ]
 n_probe_layers = 2 * model.cfg.n_layers + 1
@@ -698,10 +776,10 @@ for probe, target_fn, title, probe_layer in preds:
         device,
         probe,
         batch,
-        target_fn=lambda x: target_fn(x, device) == 0,
+        target_fn=lambda x: target_fn(x, device),
         layer=probe_layer,
         index=0,
-        title=f"{title} at L{probe_layer/2}",
+        title=f"{title} at L{probe_layer / 2}",
     )
 
 # %%
@@ -988,6 +1066,7 @@ fig_accs.show()
 # After H0, we have [my moves; their moves; my moves flipped; their moves flipped]
 # Linear probe can then +- to get the board state
 
+
 # %%
 def project(
     xs: Float[t.Tensor, "d n"],
@@ -1154,7 +1233,7 @@ plot_game(
     ],
     shift_legalities=False,
     # n_cols=len(positional_keys),
-    n_cols=size//2,
+    n_cols=size // 2,
     # title="Same probe different square colinearities"
-    title=f"{key} probe colinearities between squares"
+    title=f"{key} probe colinearities between squares",
 )

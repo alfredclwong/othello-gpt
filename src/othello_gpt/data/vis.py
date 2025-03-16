@@ -224,6 +224,7 @@ def plot_probe_preds(
     layer,
     index,
     title="",
+    reversed=False,
 ):
     target = target_fn(batch).detach().cpu()
 
@@ -267,7 +268,7 @@ def plot_probe_preds(
     }
     plot_game(
         pred_dict,
-        reversed=False,
+        reversed=reversed,
         textcolor="red",
         hovertext=pred_prob[layer, index],
         shift_legalities=False,

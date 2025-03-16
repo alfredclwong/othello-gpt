@@ -86,8 +86,8 @@ labels = [
     for h in heads
     for d in range(d_head)
 ]
-probe_key = "tm"
-# probe_key = "+pee-ee"
+# probe_key = "tm"
+probe_key = "+pee-ee"
 w_k_ee = einops.einsum(
     model.W_K[layers][:, heads].transpose(-2, -1).flatten(0, -2),
     probes[probe_key][..., 4],

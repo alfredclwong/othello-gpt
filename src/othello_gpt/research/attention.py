@@ -11,6 +11,8 @@ from transformer_lens import ActivationCache
 import circuitsvis as cv
 from IPython.display import HTML
 from plotly.subplots import make_subplots
+from sklearn.decomposition import PCA
+import numpy as np
 
 from othello_gpt.data.vis import plot_in_basis, plot_game
 from othello_gpt.util import (
@@ -53,14 +55,16 @@ n_neuron = model.cfg.d_model * 4
 n_test = 100
 test_dataset = dataset_dict["test"].take(n_test)
 
+padded_W_pos = t.full((size * size, model.W_pos.shape[1]), t.nan, device=device)
+padded_W_pos[: model.W_pos.shape[0], :] = model.W_pos
 probes = load_probes(
     probe_dir,
     device,
     w_u=model.W_U.detach(),
     w_e=model.W_E.T.detach(),
-    w_p=model.W_pos.T.detach(),
+    w_p=padded_W_pos.T.detach(),
     # combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
-    combos=["+pe-ee"],
+    combos=["+pee-ee"],
     model_version=version,
 )
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
@@ -226,19 +230,6 @@ for i in range(3):
     fig.show()
 
 # %%
-p_padded = probes["p"][..., 0]
-p_padded = t.nn.functional.pad(
-    p_padded, (0, size * size - p_padded.shape[1]), value=t.nan
-)
-p_padded = p_padded.detach()
-
-b_padded = probes["b"][..., 0]
-b_padded = t.nn.functional.pad(
-    b_padded, (0, size * size - b_padded.shape[1]), value=t.nan
-)
-b_padded = b_padded.detach()
-
-# %%
 input_ids = t.tensor(test_dataset[0]["input_ids"], device=device)
 _, cache = model.run_with_cache(input_ids[:-1])
 x = cache["blocks.2.ln1.hook_normalized"][0]
@@ -250,47 +241,217 @@ plot_in_basis(
     probes["+pee-ee"][..., 4],
     labels,
     n_cols=8,
-    title="blocks.2.ln1.hook_normalized in PE-E basis",
+    title="blocks.2.ln1.hook_normalized in (PEE-EE) basis",
 )
 plot_in_basis(
     x,
-    b_padded,
+    probes["b"][..., 0],
     labels,
     n_cols=8,
     title="blocks.2.ln1.hook_normalized in B basis",
 )
 
 # %%
-# plot_in_basis(
-#     model.W_K[2, 5].T.detach().cpu(),
-#     b_padded,
-#     labels=list(range(1, 33)),
-#     title="L2H5 K.b",
-# )
-d_head_labels = [f"d_head_{i}" for i in range(32)]
+# Perform PCA on W_pos to find a lower-dimensional basis
+W_pos_np = model.W_pos.detach().cpu().numpy()  # Convert to numpy array
+pca = PCA(n_components=None)
+pca.fit(W_pos_np)
+
+# Perform PCA on a random matrix
+random_W_pos = np.random.randn(*W_pos_np.shape)
+random_pca = PCA(n_components=None)
+random_pca.fit(random_W_pos)
+
+n_redux = 10
+W_pos_redux = t.tensor(pca.components_[:n_redux], device=device).T
+probes["pr"] = einops.repeat(
+    W_pos_redux,
+    "n_redux d_model -> n_redux d_model n_layer",
+    n_layer=probes["p"].shape[-1],
+)
+probes["pr"].shape, probes["p"].shape
+
+# %%
+# Plot the cumulative explained variance for the random matrix
+fig = go.Figure()
+fig.add_trace(
+    go.Scatter(
+        x=list(range(1, len(pca.explained_variance_ratio_) + 1)),
+        y=np.cumsum(pca.explained_variance_ratio_),
+        mode="lines+markers",
+        name="(P) vectors",
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=list(range(1, len(random_pca.explained_variance_ratio_) + 1)),
+        y=np.cumsum(random_pca.explained_variance_ratio_),
+        mode="lines+markers",
+        name="Random vectors",
+    )
+)
+fig.update_layout(
+    title="Cumulative Explained Variance of PCA Components",
+    xaxis_title="Number of Components",
+    yaxis_title="Cumulative %var",
+    xaxis=dict(range=[1, 31]),
+    height=500,
+    width=800,
+)
+fig.show()
+
+# %%
+plot_in_basis(
+    probes["pr"][..., 0].T,
+    probes["p"][..., 0],
+    labels=[f"(PR)_{i}" for i in range(n_redux)],
+    title="(PR).(P)",
+)
+
+# %%
+square_labels = [move_id_to_text(i, size) for i in range(size*size)]
+pos_labels = list(range(model.cfg.n_ctx))
+
+# bilinear_probes = ["ee", "mov"]
+# labels = [square_labels, square_labels]
+
+# bilinear_probes = ["ee", "p"]
+# labels = [square_labels, pos_labels]
+
+bilinear_probes = ["ee", "pr"]
+labels = [square_labels, pos_labels]
+
+ee_ov_mov = (
+    probes[bilinear_probes[0]][..., 4].T @
+    model.OV[2, 5] @
+    probes[bilinear_probes[1]][..., 4]
+)
+
+fig = go.Figure()
+
+fig.add_trace(
+    go.Heatmap(
+        z=ee_ov_mov.AB.detach().cpu(),
+        y=labels[0],
+        x=labels[1],
+        colorscale="gray",
+        showscale=False,
+        xgap=0.2,
+        ygap=0.2,
+        texttemplate="%{text}",
+    ),
+)
+
+fig.update_yaxes(
+    showline=True,
+    linecolor="black",
+    linewidth=1,
+    mirror=True,
+    constrain="domain",
+    autorange="reversed",
+    title=f"{bilinear_probes[0]}",
+)
+
+fig.update_xaxes(
+    showline=True,
+    linecolor="black",
+    linewidth=1,
+    mirror=True,
+    scaleanchor="y",
+    scaleratio=1,
+    constrain="domain",
+    title=f"{bilinear_probes[1]}",
+)
+
+fig.update_layout(
+    title=f"L2H5 {bilinear_probes[0]}.OV.{bilinear_probes[1]}",
+    margin=dict(l=10, r=10, t=50, b=10),
+    width=300,
+    height=500,
+    xaxis=dict(
+        tickmode="array",
+        tickvals=[i + 0.5 for i in range(len(labels[1]))],
+        ticktext=labels[1],
+        tickfont=dict(size=8),
+        tickangle=0,
+    ),
+    yaxis=dict(
+        tickmode="array",
+        tickvals=[i for i in range(len(labels[0]))],
+        ticktext=labels[0],
+        tickfont=dict(size=8),
+    ),
+)
+
+fig.show()
+
+# %%
+d_head_labels = [f"d_head_{i}" for i in range(model.cfg.d_head)]
 plot_in_basis(
     model.W_K[2, 5].T.detach(),
     probes["+pee-ee"][..., 4],
     labels=d_head_labels,
-    title="L2H5 K.(pe-e)",
+    title="L2H5 W_K.(pee-ee)",
+    n_cols=4,
 )
 plot_in_basis(
     model.W_K[2, 5].T.detach(),
-    p_padded,
+    probes["mov"][..., 4],
     labels=d_head_labels,
-    title="L2H5 K.p",
+    title="L2H5 W_K.mov",
+    n_cols=4,
 )
 plot_in_basis(
-    model.W_Q[2, 5].T.detach(),
+    model.W_K[2, 5].T.detach(),
+    probes["p"][..., 0],
+    labels=d_head_labels,
+    title="L2H5 W_K.p",
+    n_cols=4,
+)
+plot_in_basis(
+    model.W_K[2, 5].T.detach(),
+    probes["pr"][..., :9, 0],
+    labels=d_head_labels,
+    title="L2H5 W_K.pr",
+    n_cols=4,
+)
+
+# %%
+d_head_labels = [f"d_head_{i}" for i in range(model.cfg.d_head)]
+plot_in_basis(
+    model.W_O[2, 5].detach(),
+    probes["ee"][..., 4],
+    labels=d_head_labels,
+    title="L2H5 W_O.ee",
+    n_cols=4,
+)
+plot_in_basis(
+    model.W_V[2, 5].T.detach(),
     probes["+pee-ee"][..., 4],
     labels=d_head_labels,
-    title="L2H5 Q.(pe-e)",
+    title="L2H5 W_V.(pee-ee)",
+    n_cols=4,
 )
 plot_in_basis(
-    model.W_Q[2, 5].T.detach(),
-    p_padded,
+    model.W_V[2, 5].T.detach(),
+    probes["mov"][..., 4],
     labels=d_head_labels,
-    title="L2H5 Q.p",
+    title="L2H5 W_V.mov",
+    n_cols=4,
+)
+plot_in_basis(
+    model.W_V[2, 5].T.detach(),
+    probes["p"][..., 4],
+    labels=d_head_labels,
+    title="L2H5 W_V.p",
+    n_cols=4,
+)
+plot_in_basis(
+    model.W_V[2, 5].T.detach(),
+    probes["pr"][..., :9, 0],
+    labels=d_head_labels,
+    title="L2H5 W_V.pr",
+    n_cols=4,
 )
 
 # %%

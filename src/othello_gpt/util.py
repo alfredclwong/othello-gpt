@@ -102,13 +102,16 @@ def load_probes(
             (None, "ee"): "probe_6M_ee_20250226_195517.pt",
             (None, "tm"): "probe_6M_tm_20250226_193647.pt",
             (None, "le"): "probe_6M_le_20250226_194352.pt",
-            (None, "cne"): "probe_6M_cne_20250226_192345.pt",
-            (None, "cpm"): "probe_6M_cpm_20250226_191228.pt",
-            (None, "ct"): "probe_6M_ct_20250226_190107.pt",
+            # (None, "cne"): "probe_6M_cne_20250226_192345.pt",
+            # (None, "cpm"): "probe_6M_cpm_20250226_191228.pt",
+            # (None, "ct"): "probe_6M_ct_20250226_190107.pt",
+            (None, "pee"): "probe_6M_pee_20250226_200214.pt",
             ("ptm", None): "probe_6M_ptm_20250226_184808.pt",
-            (None, "pe"): "probe_6M_pee_20250226_200214.pt",
-            (None, "tnpt"): "probe_6M_tnpt_20250227_113623.pt",
+            # (None, "tnpt"): "probe_6M_tnpt_20250227_113623.pt",
             "met": "probe_6M_tem_20250228_161558.pt",
+            ("pt", "pe", "pm"): "probe_6M_ptem_20250310_154322.pt",
+            # (None, "ce"): "probe_6M_ce_20250311_162321.pt",
+            (None, "mov"): "probe_6M_mov_20250311_163537.pt",
         }
     elif model_version == "2M":
         probe_names = {

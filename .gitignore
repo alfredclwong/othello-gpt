@@ -1,13 +1,6 @@
 **/wandb/
 /data/probes/*.pt
-!data/probes/probe_4M_cap_20250225_051206.pt
-!data/probes/probe_4M_ee_20250225_155557.pt
-!data/probes/probe_4M_le_20250225_181838.pt
-!data/probes/probe_4M_legal_20250225_045040.pt
-!data/probes/probe_4M_pptem_20250225_050625.pt
-!data/probes/probe_4M_ptem_20250225_050051.pt
-!data/probes/probe_4M_tem_20250225_045520.pt
-!data/probes/probe_4M_tm_20250225_181200.pt
+!data/probes/probe_6M*
 .DS_Store
 scratch.ipynb
 *secret*

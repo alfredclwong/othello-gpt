@@ -124,10 +124,12 @@ def tm_target(batch, device):
 
 def ptm_target(batch, device, n_shift=1):
     tm = tm_target(batch, device)
+    if n_shift % 2 == 1:
+        tm = 1 - tm
     n_batch = tm.shape[0]
     n_out = tm.shape[-1]
     initial_board = t.full((n_batch, n_shift, n_out), t.nan, device=device)
-    return t.cat([initial_board, 1-tm[:, :-n_shift]], dim=1)
+    return t.cat([initial_board, tm[:, :-n_shift]], dim=1)
 
 
 def bw_target(batch, device):
@@ -160,6 +162,8 @@ def prev_tem_target(batch, device, n_shift=1, pad_nan=True) -> Float[t.Tensor, "
         initial_board[:, -1, [i, i + 1], [i + 1, i]] = 1
         initial_board = initial_board.flatten(2) + 1
 
+    if n_shift % 2 == 1:
+        tem = 2 - tem
     return t.cat([initial_board, tem[:, :-n_shift]], dim=1)
 
 
@@ -197,11 +201,25 @@ def l_if_e_target(batch, device):
 #     return t.logical_and(flip_parity, (otem == 2)).int()
 
 
-def captures_target(batch, device):
+def move_target(batch, device):
+    coords = t.tensor(batch["coords"], device=device)[:, :-1]
+    size = coords.max().item() + 1
+    moves = t.zeros((*coords.shape[:-1], size, size), device=device, dtype=int)
+    moves[
+        t.arange(moves.shape[0]).unsqueeze(1),
+        t.arange(moves.shape[1]),
+        coords[..., 0],
+        coords[..., 1],
+    ] = 1
+    return moves.flatten(2)
+
+
+def captures_target(batch, device, include_move = False):
     # Hypothesis: each token tracks the tiles that it captured when the move was played
     # After H0, we have [my moves; their moves; my moves flipped; their moves flipped]
     # This gives us the
-    return t.tensor(batch["flips"], device=device)[:, :-1].int().flatten(2)
+    flips = t.tensor(batch["flips"], dtype=int, device=device)[:, :-1].flatten(2)
+    return flips + move_target(batch, device) if include_move else flips
 
 
 def c_if_ne_target(batch, device):
