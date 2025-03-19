@@ -201,10 +201,29 @@ def l_if_e_target(batch, device):
 #     return t.logical_and(flip_parity, (otem == 2)).int()
 
 
+def z_target(batch, device):
+    input_ids = t.tensor(batch["input_ids"], device=device)[:, :-1]
+    y = t.zeros_like(input_ids, dtype=int).unsqueeze(-1)
+    y[:, 0] = 1
+    return y
+
+
+def pos_target(batch, device):
+    input_ids = t.tensor(batch["input_ids"], device=device)[:, :-1]
+    y = t.zeros((*input_ids.shape, 4), device=device, dtype=int)
+    y[:, 0, 0] = 1
+    y[:, 1::2, 1] = 1
+    y[:, ::2, 2] = 1
+    y[:, -1, 3] = 1
+    return y
+
+
 def move_target(batch, device):
     coords = t.tensor(batch["coords"], device=device)[:, :-1]
     size = coords.max().item() + 1
-    moves = t.zeros((*coords.shape[:-1], size, size), device=device, dtype=int)
+    moves = t.zeros((*coords.shape[:-1], size, size), device=device)
+    c0 = size // 2 - 1
+    moves[..., [c0, c0, c0+1, c0+1], [c0, c0+1, c0, c0+1]] = t.nan
     moves[
         t.arange(moves.shape[0]).unsqueeze(1),
         t.arange(moves.shape[1]),

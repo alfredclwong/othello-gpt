@@ -98,6 +98,16 @@ def load_probes(
         }
     elif model_version == "6M":
         probe_names = {
+            (None, "c"): "probe_6M_cap_20250319_153905.pt",
+            (None, "ee"): "probe_6M_ee_20250319_154628.pt",
+            (None, "l"): "probe_6M_legal_20250319_153108.pt",
+            (None, "mov"): "probe_6M_mov_20250319_154227.pt",
+            (None, "pee"): "probe_6M_pee_20250319_155003.pt",
+            (None, "pos"): "probe_6M_pos_20250319_154452.pt",
+            "met": "probe_6M_tem_20250319_153503.pt",
+        }
+    elif model_version == "6M-b":
+        probe_names = {
             (None, "c"): "probe_6M_cap_20250226_185453.pt",
             (None, "ee"): "probe_6M_ee_20250226_195517.pt",
             (None, "tm"): "probe_6M_tm_20250226_193647.pt",
@@ -112,6 +122,7 @@ def load_probes(
             ("pt", "pe", "pm"): "probe_6M_ptem_20250310_154322.pt",
             # (None, "ce"): "probe_6M_ce_20250311_162321.pt",
             (None, "mov"): "probe_6M_mov_20250311_163537.pt",
+            (None, "pos"): "probe_6M_pos_20250318_115155.pt",
         }
     elif model_version == "2M":
         probe_names = {
@@ -222,12 +233,19 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
         n_embd = 144
         bias = True
         weight_tying = False
-    elif name == "awonga/othello-gpt-6M":
+    elif name == "awonga/othello-gpt-6M-b":
         size = 6
         n_layer = 8
         n_head = 8
         n_embd = 256
         bias = True
+        weight_tying = False
+    elif name == "awonga/othello-gpt-6M":
+        size = 6
+        n_layer = 8
+        n_head = 8
+        n_embd = 256
+        bias = False
         weight_tying = False
     elif name == "awonga/othello-gpt-4M":
         size = 6

@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import plotly.graph_objects as go
@@ -162,6 +162,7 @@ def plot_in_basis(
     top_n: int = 0,
     title: str = "",
     n_cols: int = 5,
+    bias: Optional[Float[t.Tensor, "n"]] = None,
 ):
     # transform data vectors, e.g. neuron w_outs to a different basis, e.g. probe and visualise
     if len(probe.shape) == 2:
@@ -177,6 +178,9 @@ def plot_in_basis(
         probe,
         "n d_model, n_probe d_model row col -> n n_probe row col",
     ).flatten(0, 1).cpu()
+
+    if bias is not None:
+        transformed_vectors += bias.unsqueeze(-1).unsqueeze(-1).cpu()
 
     abs_max_indices = transformed_vectors.flatten(1).abs().max(dim=1)[1]
     abs_max_sign = t.sign(

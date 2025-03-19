@@ -43,7 +43,7 @@ size = 6
 all_squares = get_all_squares(size)
 
 # %%
-version = "1.5M"
+version = "6M"
 model = load_model(device, f"awonga/othello-gpt-{version}")
 n_layer = model.cfg.n_layers
 n_head = model.cfg.n_heads
@@ -52,7 +52,7 @@ d_model = model.cfg.d_model
 n_neuron = model.cfg.d_model * 4
 
 # %%
-n_test = 100
+n_test = 200
 test_dataset = dataset_dict["test"].take(n_test)
 
 padded_W_pos = t.full((size * size, model.W_pos.shape[1]), t.nan, device=device)
@@ -63,10 +63,20 @@ probes = load_probes(
     w_u=model.W_U.detach(),
     w_e=model.W_E.T.detach(),
     w_p=padded_W_pos.T.detach(),
-    # combos=["t+m", "t-m", "t-e", "t-pt", "m-pm"],
-    combos=["+pee-ee"],
+    combos=["+t-m", "+pee-ee"],
     model_version=version,
 )
+probes["r"] = t.randn_like(probes["ee"])
+probes["zs"] = t.stack([
+    -probes["pos"][..., 0, :],
+    -probes["pos"][..., 0, :],
+    probes["pos"][..., 0, :],
+    probes["pos"][..., 0, :],
+], dim=-2)
+probes["z"] = t.stack([
+    -probes["pos"][..., 0, :],
+    probes["pos"][..., 0, :],
+], dim=-2)
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
 
 # %%
@@ -120,7 +130,6 @@ def visualize_attention_patterns(
     # Return the visualisation as raw code
     return f"<div style='max-width: {str(max_width)}px;'>{title_html + plot}</div>"
 
-# %%
 for i in range(3):
     test_game = test_dataset[i]
     test_input_ids = t.tensor(test_game["input_ids"], device=device)
@@ -135,203 +144,116 @@ for i in range(3):
     fig.show()
 
 # %%
-(
-    model.W_Q.shape,
-    model.W_K.shape,
-    model.W_V.shape,
-    model.W_O.shape,
-)  # n_layer n_head d_model d_head
-
-# %%
-# L2H5 attends to D5 strongly and pos 0 weakly, dst invariant
-lh = (2, 5)
-# lh = (1, 0)
-# p = probes["tm"][:, all_squares, 4].T
-# pq = probes["p"][:, :, 4]
-pk = probes["+pee-ee"][:, all_squares, 4]
-# pk = probes["p"][:, :, 4]
-po = probes["ee"][:, all_squares, 4]
-pv = probes["+pee-ee"][:, all_squares, 4]
-all_squares_text = [move_id_to_text(i, size) for i in all_squares]
-# for i in [0, 1, 6, 7]:
-for i in range(3):
-    test_game = test_dataset[i]
-    input_ids = t.tensor(test_game["input_ids"])
-    moves = test_game["squares"][:-1]
-
-    _, cache = model.run_with_cache(input_ids[:-1])
-    x = cache[f"blocks.{lh[0]}.ln1.hook_normalized"][0]
-    a = (x @ model.QK[*lh] @ pk).AB
-    v = (po.T @ model.OV[*lh] @ pv).AB
-    # Apply an attn mask to a
-    attn_mask = t.tril(t.ones(a.shape[-2:], device=a.device, dtype=bool))
-    a = t.where(attn_mask, a, -t.inf)
-
-    fig = make_subplots(rows=1, cols=2)
-    fig.add_trace(
-        go.Heatmap(
-            z=a.softmax(1).detach().cpu(),
-            # z=a.detach().cpu(),
-            # z=cache[f"blocks.{lh[0]}.attn.hook_pattern"][0, lh[1]].detach().cpu(),
-            # z=cache[f"blocks.{lh[0]}.attn.hook_attn_scores"][0, lh[1]].detach().cpu(),
-            y=moves,
-            x=all_squares_text,
-            # x=list(range(model.cfg.n_ctx)),
-            colorscale="gray",
-        ),
-        row=1, col=1,
-    )
-    fig.add_trace(
-        go.Heatmap(
-            z=v.detach().cpu(),
-            y=all_squares_text,
-            x=all_squares_text,
-            colorscale="gray",
-        ),
-        row=1, col=2,
-    )
-    fig.update_layout(
-        height=700,
-        width=1600,
-    )
-    fig.update_yaxes(
-        title_text="dst (Attention)",
-        row=1, col=1,
-    )
-    fig.update_xaxes(
-        title_text="src (Attention)",
-        row=1, col=1,
-    )
-    fig.update_yaxes(
-        title_text="probe",
-        row=1, col=2,
-    )
-    fig.update_xaxes(
-        title_text="src",
-        row=1, col=2,
-    )
-    fig.update_yaxes(
-        showline=True,
-        linecolor="black",
-        linewidth=1,
-        mirror=True,
-        constrain="domain",
-        autorange="reversed",
-    )
-    fig.update_xaxes(
-        showline=True,
-        linecolor="black",
-        linewidth=1,
-        mirror=True,
-        scaleanchor="y",
-        scaleratio=1,
-        constrain="domain",
-    )
-    fig.show()
-
-# %%
 input_ids = t.tensor(test_dataset[0]["input_ids"], device=device)
 _, cache = model.run_with_cache(input_ids[:-1])
-x = cache["blocks.2.ln1.hook_normalized"][0]
+block = "blocks.0.ln2.hook_normalized"
+x = cache[block][0]
 
 labels = [f"{i+1}. {s}" for i, s in enumerate(test_dataset[0]["squares"])]
 plot_game(test_dataset[0])
 plot_in_basis(
     x,
-    probes["+pee-ee"][..., 4],
+    probes["mov"][..., 4],
     labels,
     n_cols=8,
-    title="blocks.2.ln1.hook_normalized in (PEE-EE) basis",
+    title=f"{block} in (MOV) basis",
 )
 plot_in_basis(
     x,
-    probes["b"][..., 0],
+    padded_W_pos.T.detach(),
     labels,
     n_cols=8,
-    title="blocks.2.ln1.hook_normalized in B basis",
+    title=f"{block} in (P) basis",
 )
-
-# %%
-# Perform PCA on W_pos to find a lower-dimensional basis
-W_pos_np = model.W_pos.detach().cpu().numpy()  # Convert to numpy array
-pca = PCA(n_components=None)
-pca.fit(W_pos_np)
-
-# Perform PCA on a random matrix
-random_W_pos = np.random.randn(*W_pos_np.shape)
-random_pca = PCA(n_components=None)
-random_pca.fit(random_W_pos)
-
-n_redux = 10
-W_pos_redux = t.tensor(pca.components_[:n_redux], device=device).T
-probes["pr"] = einops.repeat(
-    W_pos_redux,
-    "n_redux d_model -> n_redux d_model n_layer",
-    n_layer=probes["p"].shape[-1],
-)
-probes["pr"].shape, probes["p"].shape
-
-# %%
-# Plot the cumulative explained variance for the random matrix
-fig = go.Figure()
-fig.add_trace(
-    go.Scatter(
-        x=list(range(1, len(pca.explained_variance_ratio_) + 1)),
-        y=np.cumsum(pca.explained_variance_ratio_),
-        mode="lines+markers",
-        name="(P) vectors",
-    )
-)
-fig.add_trace(
-    go.Scatter(
-        x=list(range(1, len(random_pca.explained_variance_ratio_) + 1)),
-        y=np.cumsum(random_pca.explained_variance_ratio_),
-        mode="lines+markers",
-        name="Random vectors",
-    )
-)
-fig.update_layout(
-    title="Cumulative Explained Variance of PCA Components",
-    xaxis_title="Number of Components",
-    yaxis_title="Cumulative %var",
-    xaxis=dict(range=[1, 31]),
-    height=500,
-    width=800,
-)
-fig.show()
+# plot_in_basis(
+#     x,
+#     probes["zs"][..., 4],
+#     labels,
+#     n_cols=8,
+#     title="Z",
+# )
 
 # %%
 plot_in_basis(
-    probes["pr"][..., 0].T,
+    probes["pos"][..., 0].T,
     probes["p"][..., 0],
-    labels=[f"(PR)_{i}" for i in range(n_redux)],
-    title="(PR).(P)",
+    labels=[f"(pos)_{i}.(p)" for i in range(4)],
+    title="(POS) in (P) basis",
+    n_cols=4,
 )
 
 # %%
-square_labels = [move_id_to_text(i, size) for i in range(size*size)]
+test_game = test_dataset[1]
+input_ids = t.tensor(test_game["input_ids"], device=device)
+_, cache = model.run_with_cache(input_ids[:-1])
+x = cache["blocks.2.ln1.hook_normalized"][0]
+
+all_square_labels = [move_id_to_text(i, size) for i in all_squares]
 pos_labels = list(range(model.cfg.n_ctx))
 
-# bilinear_probes = ["ee", "mov"]
-# labels = [square_labels, square_labels]
+circuits = {
+    "O": (model.W_O.transpose(-2, -1), t.zeros_like(model.b_V)),
+    "V": (model.W_V, model.b_V),
+    "Q": (model.W_Q, model.b_Q),
+    "K": (model.W_K, model.b_K),
+}
+layer = 2
+head = 5
+circuit = "QK"
 
-# bilinear_probes = ["ee", "p"]
-# labels = [square_labels, pos_labels]
+bilinear_probes_desc = [
+    ("z", slice(None)),
+    ("z", slice(None)),
+    # ("r", all_squares),
+    # ("x", slice(None)),
+    # ("ee", all_squares),
+    # ("mov", all_squares),
+]
+moves = test_game["squares"][:-1]
+labels = [
+    ["~(Z)", "(Z)"],
+    ["~(Z)", "(Z)"],
+    # list(range(len(all_square_labels))),
+    # moves,
+    # pos_labels,
+    # all_square_labels,
+    # all_square_labels,
+    # moves,
+]
+bilinear_probes = [
+    x.T.clone() if k == "x" else
+    probes[k][..., squares, 2 * layer].clone()
+    for k, squares in bilinear_probes_desc
+]
+bilinear_probes[0] *= 10
+bilinear_probes_desc[0] = ("10z", slice(None))
+bilinear_probes[1] *= 10
+bilinear_probes_desc[1] = ("10z", slice(None))
+# bilinear_probes[0] = x.T
+# bilinear_probes[1] = x.T
 
-bilinear_probes = ["ee", "pr"]
-labels = [square_labels, pos_labels]
-
-ee_ov_mov = (
-    probes[bilinear_probes[0]][..., 4].T @
-    model.OV[2, 5] @
-    probes[bilinear_probes[1]][..., 4]
-)
+z = (
+    (
+        bilinear_probes[0].T @  # n_probe, d_model
+        circuits[circuit[0]][0][layer, head]  # d_model, d_head
+        + circuits[circuit[0]][1][layer, head]  # d_head
+    ) @ (
+        bilinear_probes[1].T @
+        circuits[circuit[1]][0][layer, head]
+        + circuits[circuit[1]][1][layer, head]
+    ).T / np.sqrt(model.cfg.d_model)
+).detach().cpu()
+# z = t.masked_fill(z, t.triu(t.ones_like(z, dtype=bool), 1), -t.inf)
+# z = z.softmax(1)
+# z = (
+#     bilinear_probes[0].T @ model.QK[layer, head] @ bilinear_probes[1]
+# ).AB.detach().cpu()
 
 fig = go.Figure()
 
 fig.add_trace(
     go.Heatmap(
-        z=ee_ov_mov.AB.detach().cpu(),
+        z=z,
         y=labels[0],
         x=labels[1],
         colorscale="gray",
@@ -349,7 +271,11 @@ fig.update_yaxes(
     mirror=True,
     constrain="domain",
     autorange="reversed",
-    title=f"{bilinear_probes[0]}",
+    title=f"{bilinear_probes_desc[0][0]} ({circuit[0]})",
+    tickmode="array",
+    tickvals=list(range(len(labels[0]))),
+    ticktext=labels[0],
+    tickfont=dict(size=8),
 )
 
 fig.update_xaxes(
@@ -360,27 +286,19 @@ fig.update_xaxes(
     scaleanchor="y",
     scaleratio=1,
     constrain="domain",
-    title=f"{bilinear_probes[1]}",
+    title=f"{bilinear_probes_desc[1][0]} ({circuit[1]})",
+    tickmode="array",
+    tickvals=list(range(len(labels[1]))),
+    ticktext=labels[1],
+    tickfont=dict(size=8),
+    tickangle=0,
 )
 
 fig.update_layout(
-    title=f"L2H5 {bilinear_probes[0]}.OV.{bilinear_probes[1]}",
+    title=f"L2H5 {bilinear_probes_desc[0][0]}.{circuit}.{bilinear_probes_desc[1][0]}",
     margin=dict(l=10, r=10, t=50, b=10),
-    width=300,
-    height=500,
-    xaxis=dict(
-        tickmode="array",
-        tickvals=[i + 0.5 for i in range(len(labels[1]))],
-        ticktext=labels[1],
-        tickfont=dict(size=8),
-        tickangle=0,
-    ),
-    yaxis=dict(
-        tickmode="array",
-        tickvals=[i for i in range(len(labels[0]))],
-        ticktext=labels[0],
-        tickfont=dict(size=8),
-    ),
+    width=200,
+    height=len(labels[0]) * 15 + 100,
 )
 
 fig.show()
@@ -389,31 +307,27 @@ fig.show()
 d_head_labels = [f"d_head_{i}" for i in range(model.cfg.d_head)]
 plot_in_basis(
     model.W_K[2, 5].T.detach(),
-    probes["+pee-ee"][..., 4],
-    labels=d_head_labels,
-    title="L2H5 W_K.(pee-ee)",
-    n_cols=4,
-)
-plot_in_basis(
-    model.W_K[2, 5].T.detach(),
     probes["mov"][..., 4],
     labels=d_head_labels,
     title="L2H5 W_K.mov",
     n_cols=4,
+    bias=model.b_K[2, 5].detach().cpu(),
 )
 plot_in_basis(
     model.W_K[2, 5].T.detach(),
-    probes["p"][..., 0],
+    probes["zs"][..., 4],
     labels=d_head_labels,
-    title="L2H5 W_K.p",
+    title="L2H5 W_K.z",
     n_cols=4,
+    bias=model.b_K[2, 5].detach().cpu(),
 )
 plot_in_basis(
-    model.W_K[2, 5].T.detach(),
-    probes["pr"][..., :9, 0],
+    model.W_Q[2, 5].T.detach(),
+    probes["zs"][..., 0],
     labels=d_head_labels,
-    title="L2H5 W_K.pr",
+    title="L2H5 W_Q.z",
     n_cols=4,
+    bias=model.b_Q[2, 5].detach().cpu(),
 )
 
 # %%
@@ -424,13 +338,15 @@ plot_in_basis(
     labels=d_head_labels,
     title="L2H5 W_O.ee",
     n_cols=4,
+    bias=model.b_O[2, 5].detach().cpu(),
 )
 plot_in_basis(
     model.W_V[2, 5].T.detach(),
-    probes["+pee-ee"][..., 4],
+    probes["z"][..., 4],
     labels=d_head_labels,
     title="L2H5 W_V.(pee-ee)",
     n_cols=4,
+    bias=model.b_V[2, 5].detach().cpu(),
 )
 plot_in_basis(
     model.W_V[2, 5].T.detach(),
@@ -438,20 +354,7 @@ plot_in_basis(
     labels=d_head_labels,
     title="L2H5 W_V.mov",
     n_cols=4,
-)
-plot_in_basis(
-    model.W_V[2, 5].T.detach(),
-    probes["p"][..., 4],
-    labels=d_head_labels,
-    title="L2H5 W_V.p",
-    n_cols=4,
-)
-plot_in_basis(
-    model.W_V[2, 5].T.detach(),
-    probes["pr"][..., :9, 0],
-    labels=d_head_labels,
-    title="L2H5 W_V.pr",
-    n_cols=4,
+    bias=model.b_V[2, 5].detach().cpu(),
 )
 
 # %%
@@ -462,49 +365,6 @@ _, focus_cache = model.run_with_cache(
     names_filter="blocks.2.attn.hook_pattern",
 )
 focus_cache
-
-# %%
-# Try to find a time where L2H5 doesn't attend to pos 0 or D5
-# Either C2 at pos 1, C5 at pos 2, C2 at pos 2, B4 at pos 2
-# Can see L2H5D3 will cancel D5 and boost pos 1 if dst has C2 at pos 1
-d5_pos = (focus_input_ids == 23).argmax(-1)
-for i in range(13, len(focus_batch)):
-    a = focus_cache["blocks.2.attn.hook_pattern"][i, 5]
-    a0 = a[:, 0]
-    a_d5 = a[:, d5_pos[i]]
-    max_attn = t.stack([a0, a_d5]).max(0)[0]
-    if t.any(max_attn < 0.9):
-        test_game = focus_batch[i]
-        test_input_ids = t.tensor(test_game["input_ids"], device=device)
-        if test_input_ids[1] == 8 or test_input_ids[2] == 22 or test_input_ids[2] == 8:
-            continue
-        test_logits, test_cache = model.run_with_cache(test_input_ids[:-1])
-        vis = visualize_attention_patterns(
-            list(range(model.cfg.n_layers * model.cfg.n_heads)),
-            test_cache,
-            test_game["moves"],
-        )
-        print(i)
-        display(HTML(vis))
-        plot_game(test_game)
-        break
-
-# %%
-# Look for heads (or neurons) which attend to the ee_D5 output from L2H5
-plot_in_basis(
-    model.W_K[3, 0].T.detach(),
-    probes["ee"]
-)
-
-
-
-
-
-
-
-
-
-
 
 
 

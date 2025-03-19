@@ -36,6 +36,7 @@ from othello_gpt.research.targets import (
     prev_empty_target,
     t_npt_target,
     move_target,
+    pos_target,
 )
 from othello_gpt.util import (
     get_all_squares,
@@ -94,11 +95,11 @@ probes = load_probes(
     w_p=padded_W_pos.T.detach(),
     combos=[
         "+t-m",
-        "+e+e-t-m",
+        # "+e+e-t-m",
         "+pee-ee",
-        "+pe-e",
-        "+pt-pm",
-        "+pt-pm+c",
+        # "+pe-e",
+        # "+pt-pm",
+        # "+pt-pm+c",
         # "+b+ee",
         # "+le+ee",
         # "+cpm-ptm-pee+ee",  # TODO properly realign cpm to pm
@@ -116,7 +117,6 @@ probes = load_probes(
 
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
 
-# %%
 colors = dict(
     zip(
         [*probes.keys(), "tem", "ptem"],
@@ -130,20 +130,11 @@ probe_layer = model.cfg.n_layers * 2 + 1 - 6
 # Probe W_E (I expect to see captures!)
 top_left_squares = [y * size + x for y in range(size // 2) for x in range(size // 2)]
 top_left_squares = [i for i in top_left_squares if i in all_squares]
-# labels = [move_id_to_text(i, size) for i in top_left_squares]
+top_left_labels = [move_id_to_text(i, size) for i in top_left_squares]
 labels = [move_id_to_text(i, size) for i in actually_all_squares]
 # for k in ["ee", "tm", "ptm", "le", "+pee-ee", "tnpt"]:
-for k in ["+t-m", "ee", "+pee-ee", "pee"]:
+for k in ["+t-m", "ee", "+pee-ee", "mov"]:
     plot_in_basis(
-        # project(
-        #     probes["b"][..., 0].nan_to_num(),
-        #     probes["+pee-ee"][..., 8],
-        # )[0].T,
-        # project(
-        #     probes["tm"][..., 8],
-        #     probes["+pee-ee"][..., 8],
-        # )[0],
-        # probes["b"][..., top_left_squares, 0].T,
         probes["b"][..., actually_all_squares, 0].T,
         probes[k][..., probe_layer],
         # probes[k][..., 0],
@@ -157,7 +148,7 @@ for k in ["+t-m", "ee", "+pee-ee", "pee"]:
 # Probe W_U
 # for k in ["ee", "tm", "ptm", "le", "+pee-ee", "tnpt"]:
 # for k in ["tm", "+pee-ee", "+t-m", "+pee-e"]:
-for k in ["ee", "+t-m"]:
+for k in ["ee", "+t-m", "mov", "l"]:
     plot_in_basis(
         # project(
         #     probes["b"][..., 0].nan_to_num(),
@@ -170,7 +161,7 @@ for k in ["ee", "+t-m"]:
         probes["u"][..., top_left_squares, 0].T,
         probes[k][..., probe_layer],
         # probes[k][..., 0],
-        labels=labels,
+        labels=top_left_labels,
         title=f"W_U in {k} L{probe_layer / 2} probe basis",
         n_cols=size // 2,
     )
@@ -593,23 +584,24 @@ linear_probe_tem = t.stack([probes["m"], probes["e"], probes["t"]], dim=-2)
 linear_probe_m = t.stack([-probes["m"], probes["m"]], dim=-2)
 linear_probe_e = t.stack([-probes["e"], probes["e"]], dim=-2)
 linear_probe_t = t.stack([-probes["t"], probes["t"]], dim=-2)
-linear_probe_ptem = t.stack([probes["pm"], probes["pe"], probes["pt"]], dim=-2)
+# linear_probe_ptem = t.stack([probes["pm"], probes["pe"], probes["pt"]], dim=-2)
 linear_probe_cap = t.stack([-probes["c"], probes["c"]], dim=-2)
 linear_probe_mov = t.stack([-probes["mov"], probes["mov"]], dim=-2)
-linear_probe_pm = t.stack([-probes["pm"], probes["pm"]], dim=-2)
-linear_probe_pe = t.stack([-probes["pe"], probes["pe"]], dim=-2)
-linear_probe_pt = t.stack([-probes["pt"], probes["pt"]], dim=-2)
+# linear_probe_pm = t.stack([-probes["pm"], probes["pm"]], dim=-2)
+# linear_probe_pe = t.stack([-probes["pe"], probes["pe"]], dim=-2)
+# linear_probe_pt = t.stack([-probes["pt"], probes["pt"]], dim=-2)
 linear_probe_t_m = t.stack([-probes["+t-m"], probes["+t-m"]], dim=-2)
-linear_probe_pt_pm = t.stack([-probes["+pt-pm"], probes["+pt-pm"]], dim=-2)
+# linear_probe_pt_pm = t.stack([-probes["+pt-pm"], probes["+pt-pm"]], dim=-2)
 linear_probe_ee = t.stack([-probes["ee"], probes["ee"]], dim=-2)
-linear_probe_tm = t.stack([-probes["tm"], probes["tm"]], dim=-2)
-linear_probe_le = t.stack([-probes["le"], probes["le"]], dim=-2)
+# linear_probe_tm = t.stack([-probes["tm"], probes["tm"]], dim=-2)
+linear_probe_l = t.stack([-probes["l"], probes["l"]], dim=-2)
 # linear_probe_lee = t.stack([-probes["+le+ee"], probes["+le+ee"]], dim=-2)
 # linear_probe_ptm = t.stack([-probes["ptm"], probes["ptm"]], dim=-2)
 linear_probe_pee = t.stack([-probes["pee"], probes["pee"]], dim=-2)
 linear_probe_pee_ee = t.stack([-probes["+pee-ee"], probes["+pee-ee"]], dim=-2)
 # linear_probe_tnpt = t.stack([-probes["tnpt"], probes["tnpt"]], dim=-2)
-linear_probe_eetm = t.stack([-probes["+e+e-t-m"], probes["+e+e-t-m"]], dim=-2)
+# linear_probe_eetm = t.stack([-probes["+e+e-t-m"], probes["+e+e-t-m"]], dim=-2)
+linear_probe_pos = t.stack([-probes["pos"], probes["pos"]], dim=-2)
 
 # linear_probe_combo = t.stack(
 #     [
@@ -626,7 +618,15 @@ linear_probe_eetm = t.stack([-probes["+e+e-t-m"], probes["+e+e-t-m"]], dim=-2)
 #     dim=-2,
 # )
 
-pptem_target = lambda x, device: prev_tem_target(x, device, n_shift=2)
+# pptem_target = lambda x, device: prev_tem_target(x, device, n_shift=2)
+
+# %%
+def tm_corners_target(batch, device):
+    tm_BPT = tm_target(batch, device)
+    corners = [0, size - 1, (size - 1) * size, size * size - 1]
+    tm_corners_BPT = t.full_like(tm_BPT, t.nan)
+    tm_corners_BPT[..., corners] = tm_BPT[..., corners]
+    return tm_corners_BPT
 
 # %%
 probe_targets = [
@@ -664,16 +664,17 @@ probe_targets = [
     # ),
     # ("t|!e", linear_probe_t, tm_target),
     # ("+e+e-t-m", linear_probe_eetm, empty_target),
-    ("ee", linear_probe_ee, empty_target),
-    ("+t-m", linear_probe_t_m, tm_target),
+    # ("ee", linear_probe_ee, empty_target),
+    # ("+t-m", linear_probe_t_m, tm_target),
     # ("+pt-pm", linear_probe_pt_pm, ptm_target),
-    # ("tm", linear_probe_tm, tm_target),
+    ("+t-m", linear_probe_t_m, tm_corners_target),
     # ("pee", linear_probe_pe, prev_empty_target),
     # ("l|e", linear_probe_le, l_if_e_target),
     # ("c", linear_probe_cap, captures_target),
     # ("ce", linear_probe_ce, lambda x, device: captures_target(x, device, include_move=True)),
     # ("+pee-ee", linear_probe_pee_ee, move_target),
     # ("mov", linear_probe_mov, move_target),
+    # ("pos", linear_probe_pos, pos_target),
     # ("+c+mov", linear_probe_cmov, lambda x, device: captures_target(x, device, include_move=True)),
 ]
 
@@ -735,10 +736,13 @@ preds = [
     # (linear_probe_ptem, captures_target, "PTEM probe", -6),
     # (linear_probe_cap, captures_target, "Captures probe", -7),
     # (linear_probe_ptm, ptm_target, "PT-PM probe", -6),
-    # (linear_probe_tm, tm_target, "T-M probe", -6),
-    (linear_probe_ee, empty_target, "Empty probe", 3),
+    (linear_probe_t_m, tm_corners_target, "T-M probe", -6),
+    # (linear_probe_ee, empty_target, "Empty probe", 3),
+    # (linear_probe_pee_ee, move_target, "PEE-EE probe", 5),
+    # (linear_probe_mov, move_target, "MOV probe", 5),
+    # (linear_probe_pos, pos_target, "POS probe", 1),
     # (linear_probe_pm, lambda x, device: prev_tem_target(x, device) == 0, "Previously mine probe", 5),
-    (linear_probe_pe, prev_empty_target, "Previously empty probe", 3),
+    # (linear_probe_pe, prev_empty_target, "Previously empty probe", 3),
     # (linear_probe_pt, lambda x, device: prev_tem_target(x, device) == 2, "Previously theirs probe", 5),
     # (linear_probe_pt_pm, ptm_target, "PT-PM probe", 5),
     # (linear_probe_le, l_if_e_target, "L if E probe", -2),

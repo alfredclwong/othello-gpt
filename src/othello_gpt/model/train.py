@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 from othello_gpt.data.vis import plot_game, move_id_to_coord
 from othello_gpt.model.nanoGPT import GPT, GPTConfig
 from othello_gpt.util import pad_batch, get_all_squares, load_model
+
 # %%
 device = t.device(
     "mps"
@@ -48,9 +49,9 @@ class HubGPT(GPT, hf.PyTorchModelHubMixin):
 cfg = GPTConfig(
     block_size=(size * size - 4) - 1,
     vocab_size=size * size - 4,  # no pad
-    n_layer=32,
+    n_layer=8,
     n_head=8,
-    n_embd=32,
+    n_embd=256,
     dropout=0.0,
     bias=False,
     weight_tying=False,
@@ -63,7 +64,7 @@ model = HubGPT(cfg).to(device)
 @dataclass
 class TransformerTrainingArgs:
     batch_size: int = 512
-    epochs: int = 24
+    epochs: int = 32
     max_steps_per_epoch: int = 1000
     lr: int = 1e-3
     weight_decay: int = 1e-3
@@ -176,7 +177,7 @@ trainer = TransformerTrainer(args, model)
 trainer.train()
 
 # %%
-model.push_to_hub("awonga/othello-gpt-400k")
+model.push_to_hub("awonga/othello-gpt-6M")
 
 # %%
 all_squares = t.tensor(get_all_squares(size), device=device)
