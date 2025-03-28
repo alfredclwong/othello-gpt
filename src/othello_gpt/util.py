@@ -18,10 +18,10 @@ PAD_TOKEN = -1
 
 @dataclass(frozen=True)
 class LinearProbeTrainingArgs:
-    n_epochs: int = 6
+    n_epochs: int = 8
     lr: float = 1e-3
     batch_size: int = 128
-    n_steps_per_epoch: int = 200
+    n_steps_per_epoch: int = 800
     n_test: int = 200
     betas: tuple[float, float] = (0.9, 0.99)
     weight_decay: float = 1e-3
@@ -108,21 +108,21 @@ def load_probes(
         }
     elif model_version == "6M-b":
         probe_names = {
-            (None, "c"): "probe_6M_cap_20250226_185453.pt",
-            (None, "ee"): "probe_6M_ee_20250226_195517.pt",
-            (None, "tm"): "probe_6M_tm_20250226_193647.pt",
-            (None, "le"): "probe_6M_le_20250226_194352.pt",
-            # (None, "cne"): "probe_6M_cne_20250226_192345.pt",
-            # (None, "cpm"): "probe_6M_cpm_20250226_191228.pt",
-            # (None, "ct"): "probe_6M_ct_20250226_190107.pt",
-            (None, "pee"): "probe_6M_pee_20250226_200214.pt",
-            ("ptm", None): "probe_6M_ptm_20250226_184808.pt",
-            # (None, "tnpt"): "probe_6M_tnpt_20250227_113623.pt",
-            "met": "probe_6M_tem_20250228_161558.pt",
-            ("pt", "pe", "pm"): "probe_6M_ptem_20250310_154322.pt",
-            # (None, "ce"): "probe_6M_ce_20250311_162321.pt",
-            (None, "mov"): "probe_6M_mov_20250311_163537.pt",
-            (None, "pos"): "probe_6M_pos_20250318_115155.pt",
+            (None, "c"): "probe_6M-b_cap_20250226_185453.pt",
+            (None, "ee"): "probe_6M-b_ee_20250226_195517.pt",
+            (None, "tm"): "probe_6M-b_tm_20250226_193647.pt",
+            (None, "le"): "probe_6M-b_le_20250226_194352.pt",
+            # (None, "cne"): "probe_6M-b_cne_20250226_192345.pt",
+            # (None, "cpm"): "probe_6M-b_cpm_20250226_191228.pt",
+            # (None, "ct"): "probe_6M-b_ct_20250226_190107.pt",
+            (None, "pee"): "probe_6M-b_pee_20250226_200214.pt",
+            ("ptm", None): "probe_6M-b_ptm_20250226_184808.pt",
+            # (None, "tnpt"): "probe_6M-b_tnpt_20250227_113623.pt",
+            "met": "probe_6M-b_tem_20250228_161558.pt",
+            ("pt", "pe", "pm"): "probe_6M-b_ptem_20250310_154322.pt",
+            # (None, "ce"): "probe_6M-b_ce_20250311_162321.pt",
+            (None, "mov"): "probe_6M-b_mov_20250311_163537.pt",
+            (None, "pos"): "probe_6M-b_pos_20250318_115155.pt",
         }
     elif model_version == "2M":
         probe_names = {
@@ -140,6 +140,16 @@ def load_probes(
             (None, "ee"): "probe_1.5M_ee_20250304_225308.pt",
             (None, "le"): "probe_1.5M_le_20250304_224547.pt",
             (None, "pe"): "probe_1.5M_pe_20250304_225849.pt",
+        }
+    elif model_version == "300k":
+        probe_names = {
+            "met": "probe_300k_tem_20250327_191912.pt",
+            (None, "c"): "probe_300k_cap_20250327_193735.pt",
+            (None, "mov"): "probe_300k_mov_20250327_195134.pt",
+            (None, "pos"): "probe_300k_pos_20250327_195910.pt",
+            (None, "ee"): "probe_300k_ee_20250327_200335.pt",
+            (None, "l"): "probe_300k_legal_20250327_185836.pt",
+            (None, "pee"): "probe_300k_pee_20250327_202103.pt",
         }
     else:
         raise ValueError(f"{model_version=} not recognised when loading probes...")
@@ -261,6 +271,13 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
         n_embd = 128
         bias = False
         weight_tying = False
+    elif name == "awonga/othello-gpt-800k-8h":
+        size = 6
+        n_layer = 4
+        n_head = 8
+        n_embd = 128
+        bias = False
+        weight_tying = False
     elif name == "awonga/othello-gpt-2M":
         size = 6
         n_layer = 8
@@ -280,6 +297,20 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
         n_layer = 32
         n_head = 8
         n_embd = 32
+        bias = False
+        weight_tying = False
+    elif name == "awonga/othello-gpt-300k":
+        size = 6
+        n_layer = 6
+        n_head = 8
+        n_embd = 64
+        bias = False
+        weight_tying = False
+    elif name == "awonga/othello-gpt-200k":
+        size = 6
+        n_layer = 4
+        n_head = 4
+        n_embd = 64
         bias = False
         weight_tying = False
     else:

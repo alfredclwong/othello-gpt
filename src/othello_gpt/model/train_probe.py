@@ -62,7 +62,7 @@ device = t.device(
 )
 
 # %%
-model_version = "6M"
+model_version = "300k"
 model = load_model(device, f"awonga/othello-gpt-{model_version}")
 
 # %%
@@ -202,3 +202,5 @@ for (title, target_fn, _, _), save_path in zip(runs, save_paths):
         index=0,
         title=title,
     )
+
+# %%

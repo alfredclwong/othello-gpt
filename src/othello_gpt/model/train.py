@@ -40,7 +40,6 @@ wandb.login()
 dataset_dict = load_dataset("awonga/othello-gpt")
 # plot_game(dataset_dict["test"][0], subplot_size=180, n_cols=8)
 
-
 # %%
 class HubGPT(GPT, hf.PyTorchModelHubMixin):
     pass
@@ -49,9 +48,9 @@ class HubGPT(GPT, hf.PyTorchModelHubMixin):
 cfg = GPTConfig(
     block_size=(size * size - 4) - 1,
     vocab_size=size * size - 4,  # no pad
-    n_layer=8,
+    n_layer=6,
     n_head=8,
-    n_embd=256,
+    n_embd=64,
     dropout=0.0,
     bias=False,
     weight_tying=False,
@@ -63,12 +62,12 @@ model = HubGPT(cfg).to(device)
 # %%
 @dataclass
 class TransformerTrainingArgs:
-    batch_size: int = 512
+    batch_size: int = 256
     epochs: int = 32
-    max_steps_per_epoch: int = 1000
+    max_steps_per_epoch: int = 7000
     lr: int = 1e-3
     weight_decay: int = 1e-3
-    betas: tuple[float, float] = (0.9, 0.99)
+    betas: tuple[float, float] = (0.9, 0.999)
     wandb_project: str | None = "othello-gpt"
     wandb_name: str | None = None
 
@@ -177,11 +176,11 @@ trainer = TransformerTrainer(args, model)
 trainer.train()
 
 # %%
-model.push_to_hub("awonga/othello-gpt-6M")
+model.push_to_hub("awonga/othello-gpt-300k")
 
 # %%
 all_squares = t.tensor(get_all_squares(size), device=device)
-model = load_model(device, "awonga/othello-gpt-400k")
+model = load_model(device, "awonga/othello-gpt-300k")
 n_focus = 1000
 focus_games = dataset_dict["test"].take(n_focus)
 focus_input_ids = t.tensor(focus_games["input_ids"], device=device)

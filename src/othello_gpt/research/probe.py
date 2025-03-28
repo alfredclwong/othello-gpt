@@ -80,7 +80,7 @@ device = t.device(
 
 # %%
 # version = "1.5M"
-version = "6M"
+version = "300k"
 model = load_model(device, f"awonga/othello-gpt-{version}")
 model
 
@@ -125,7 +125,7 @@ colors = dict(
 )
 
 # %%
-probe_layer = model.cfg.n_layers * 2 + 1 - 6
+probe_layer = 2
 # probe_layer = 3
 # Probe W_E (I expect to see captures!)
 top_left_squares = [y * size + x for y in range(size // 2) for x in range(size // 2)]
@@ -364,7 +364,7 @@ basis_keys = [
     # # ("+pee-ee", all_squares, 5),
     # # ("b", all_squares, 0),
     # ("u", all_squares, 0),
-    ("pr", list(range(10)), 0),
+    # ("pr", list(range(10)), 0),
 
     # ("ee", actually_all_squares, 5),
     # ("tm", actually_all_squares, 6),
@@ -503,10 +503,10 @@ def calculate_pairwise_colinearity(bases: Float[t.Tensor, "d_model basis"]):
 
 
 threshold = 0.1
-probe_layer = model.cfg.n_layers * 2 + 1 - 6
+probe_layer = 2
 # probe_layer = 0
 # colinear_keys = ["c", "ee", "tm", "le", "ptm", "pee", "tnpt", "m", "e", "t", "u", "b", "p", "+t-m", "+pee-ee", "+le+ee"]
-colinear_keys = ["ee", "+t-m", "c", "mov", "b", "u", "p", "pr"]
+colinear_keys = ["ee", "+t-m", "c", "mov", "b", "u", "p"]
 colinear_probes = t.cat([probes[k][..., probe_layer] for k in colinear_keys], dim=-1)
 colinearity_matrix = calculate_pairwise_colinearity(colinear_probes)
 colinearity_matrix = t.tril(colinearity_matrix)
@@ -598,7 +598,7 @@ linear_probe_l = t.stack([-probes["l"], probes["l"]], dim=-2)
 # linear_probe_lee = t.stack([-probes["+le+ee"], probes["+le+ee"]], dim=-2)
 # linear_probe_ptm = t.stack([-probes["ptm"], probes["ptm"]], dim=-2)
 linear_probe_pee = t.stack([-probes["pee"], probes["pee"]], dim=-2)
-linear_probe_pee_ee = t.stack([-probes["+pee-ee"], probes["+pee-ee"]], dim=-2)
+# linear_probe_pee_ee = t.stack([-probes["+pee-ee"], probes["+pee-ee"]], dim=-2)
 # linear_probe_tnpt = t.stack([-probes["tnpt"], probes["tnpt"]], dim=-2)
 # linear_probe_eetm = t.stack([-probes["+e+e-t-m"], probes["+e+e-t-m"]], dim=-2)
 linear_probe_pos = t.stack([-probes["pos"], probes["pos"]], dim=-2)
@@ -664,17 +664,18 @@ probe_targets = [
     # ),
     # ("t|!e", linear_probe_t, tm_target),
     # ("+e+e-t-m", linear_probe_eetm, empty_target),
-    # ("ee", linear_probe_ee, empty_target),
-    # ("+t-m", linear_probe_t_m, tm_target),
+    ("ee", linear_probe_ee, empty_target),
+    ("+t-m", linear_probe_t_m, tm_target),
     # ("+pt-pm", linear_probe_pt_pm, ptm_target),
-    ("+t-m", linear_probe_t_m, tm_corners_target),
+    # ("+t-m", linear_probe_t_m, tm_corners_target),
     # ("pee", linear_probe_pe, prev_empty_target),
+    ("l", linear_probe_l, legality_target),
     # ("l|e", linear_probe_le, l_if_e_target),
-    # ("c", linear_probe_cap, captures_target),
+    ("c", linear_probe_cap, captures_target),
     # ("ce", linear_probe_ce, lambda x, device: captures_target(x, device, include_move=True)),
     # ("+pee-ee", linear_probe_pee_ee, move_target),
-    # ("mov", linear_probe_mov, move_target),
-    # ("pos", linear_probe_pos, pos_target),
+    ("mov", linear_probe_mov, move_target),
+    ("pos", linear_probe_pos, pos_target),
     # ("+c+mov", linear_probe_cmov, lambda x, device: captures_target(x, device, include_move=True)),
 ]
 

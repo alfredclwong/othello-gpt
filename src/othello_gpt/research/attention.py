@@ -43,7 +43,7 @@ size = 6
 all_squares = get_all_squares(size)
 
 # %%
-version = "6M"
+version = "200k"
 model = load_model(device, f"awonga/othello-gpt-{version}")
 n_layer = model.cfg.n_layers
 n_head = model.cfg.n_heads
@@ -199,25 +199,26 @@ circuits = {
 }
 layer = 2
 head = 5
-circuit = "QK"
+circuit = "VO"
 
 bilinear_probes_desc = [
-    ("z", slice(None)),
+    # ("z", slice(None)),
     ("z", slice(None)),
     # ("r", all_squares),
     # ("x", slice(None)),
-    # ("ee", all_squares),
+    ("ee", all_squares),
+    # ("u", all_squares),
     # ("mov", all_squares),
 ]
 moves = test_game["squares"][:-1]
 labels = [
-    ["~(Z)", "(Z)"],
+    # ["~(Z)", "(Z)"],
     ["~(Z)", "(Z)"],
     # list(range(len(all_square_labels))),
     # moves,
     # pos_labels,
     # all_square_labels,
-    # all_square_labels,
+    all_square_labels,
     # moves,
 ]
 bilinear_probes = [
@@ -227,8 +228,8 @@ bilinear_probes = [
 ]
 bilinear_probes[0] *= 10
 bilinear_probes_desc[0] = ("10z", slice(None))
-bilinear_probes[1] *= 10
-bilinear_probes_desc[1] = ("10z", slice(None))
+# bilinear_probes[1] *= 10
+# bilinear_probes_desc[1] = ("10z", slice(None))
 # bilinear_probes[0] = x.T
 # bilinear_probes[1] = x.T
 
@@ -297,37 +298,47 @@ fig.update_xaxes(
 fig.update_layout(
     title=f"L2H5 {bilinear_probes_desc[0][0]}.{circuit}.{bilinear_probes_desc[1][0]}",
     margin=dict(l=10, r=10, t=50, b=10),
-    width=200,
+    # width=200,
+    width=len(labels[1]) * 15 + 100,
     height=len(labels[0]) * 15 + 100,
 )
 
 fig.show()
 
 # %%
+lh = (7, 4)
 d_head_labels = [f"d_head_{i}" for i in range(model.cfg.d_head)]
 plot_in_basis(
-    model.W_K[2, 5].T.detach(),
+    model.W_K[*lh].T.detach(),
     probes["mov"][..., 4],
     labels=d_head_labels,
-    title="L2H5 W_K.mov",
+    title=f"L{lh[0]}H{lh[1]} W_K.mov",
     n_cols=4,
-    bias=model.b_K[2, 5].detach().cpu(),
+    bias=model.b_K[*lh].detach().cpu(),
 )
+# plot_in_basis(
+#     model.W_K[*lh].T.detach(),
+#     probes["zs"][..., 4],
+#     labels=d_head_labels,
+#     title=f"L{lh[0]}H{lh[1]} W_K.z",
+#     n_cols=4,
+#     bias=model.b_K[*lh].detach().cpu(),
+# )
+# plot_in_basis(
+#     model.W_Q[*lh].T.detach(),
+#     probes["zs"][..., 0],
+#     labels=d_head_labels,
+#     title=f"L{lh[0]}H{lh[1]} W_Q.z",
+#     n_cols=4,
+#     bias=model.b_Q[*lh].detach().cpu(),
+# )
 plot_in_basis(
-    model.W_K[2, 5].T.detach(),
-    probes["zs"][..., 4],
+    model.W_Q[*lh].T.detach(),
+    probes["l"][..., 0],
     labels=d_head_labels,
-    title="L2H5 W_K.z",
+    title=f"L{lh[0]}H{lh[1]} W_Q.l",
     n_cols=4,
-    bias=model.b_K[2, 5].detach().cpu(),
-)
-plot_in_basis(
-    model.W_Q[2, 5].T.detach(),
-    probes["zs"][..., 0],
-    labels=d_head_labels,
-    title="L2H5 W_Q.z",
-    n_cols=4,
-    bias=model.b_Q[2, 5].detach().cpu(),
+    bias=model.b_Q[*lh].detach().cpu(),
 )
 
 # %%
