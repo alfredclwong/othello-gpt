@@ -31,17 +31,23 @@ dataset_dict = load_dataset("awonga/othello-gpt")
 train_dataset = dataset_dict["train"]
 test_dataset = dataset_dict["test"]
 
+# %%
+sae_cfg = OthelloSAEConfig(
+    d_in=model.cfg.d_model,
+    d_sae=2048,
+    hook_layers=list(range(model.cfg.n_layers)),
+    hook_suffixes=["attn.hook_z", "hook_mlp_out"],
+    use_wandb=True,
+    n_epochs=2,
+    n_train=300*128,
+    batch_size=128,
+    resample_freq=100,
+    resample_window=100,
+    log_steps=100,
+)
+print(sae_cfg)
+sae = OthelloSAE(sae_cfg, model, train_dataset, test_dataset, device)
+data_log = sae.optimize()
+sae.push_to_hub(f"{model_name}-sae")
 
 # %%
-for i in range(0, model.cfg.n_layers)[::-1]:
-    for hook_suffix in ["attn.hook_z", "hook_mlp_out"]:
-        sae_cfg = OthelloSAEConfig(
-            hook_name=f"blocks.{i}.{hook_suffix}",
-            hook_layer=i,
-            d_sae=2048,
-            n_epochs=8,
-        )
-        print(sae_cfg)
-        sae = OthelloSAE(sae_cfg, model, train_dataset, test_dataset)
-        data_log = sae.optimize()
-        sae.push_to_hub(f"{model_name}-sae-{sae_cfg.hook_name}")

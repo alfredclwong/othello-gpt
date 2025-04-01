@@ -1,6 +1,6 @@
 import numpy as np
 from dataclasses import dataclass
-from typing import Literal, Callable, Tuple, Any
+from typing import Literal, Callable, Tuple, Any, List
 from collections import deque
 from jaxtyping import Float
 from torch.types import Tensor
@@ -10,6 +10,8 @@ from datasets import Dataset
 from transformer_lens import HookedTransformer
 import wandb
 from tqdm import tqdm
+import einops
+from itertools import product
 
 
 def linear_lr(step, steps):
@@ -28,7 +30,8 @@ def cosine_decay_lr(step, steps):
 class OthelloSAEConfig:
     d_in: int
     d_sae: int
-    hook_name: str
+    hook_layers: List[int]
+    hook_suffixes: List[str]
     # Examples:
     # 'hook_embed',
     # 'hook_pos_embed',
@@ -51,10 +54,9 @@ class OthelloSAEConfig:
     # 'blocks.0.hook_resid_post',
     # 'ln_final.hook_scale',
     # 'ln_final.hook_normalized'
-    hook_layer: int
 
     use_wandb: bool = True
-    sparsity_coeff: float = 1e-2
+    sparsity_coeff: float = 0.1
     weight_normalize_eps: float = 1e-8
     tied_weights: bool = False
     architecture: Literal["standard", "gated", "jumprelu"] = "standard"
@@ -62,7 +64,7 @@ class OthelloSAEConfig:
     n_train: int = 1_792_000
     n_test: int = 1024
     batch_size: int = 128  # 14_000 steps
-    n_epochs: int = 5
+    n_epochs: int = 8
 
     log_steps: int = 1000
     log_warmup_steps: int = 10
@@ -81,12 +83,10 @@ class OthelloSAEConfig:
 
 
 class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
-    # TODO all layers at once
-
-    W_enc: Float[Tensor, "d_in d_sae"]
-    _W_dec: Float[Tensor, "d_sae d_in"] | None
-    b_enc: Float[Tensor, "d_sae"]
-    b_dec: Float[Tensor, "d_in"]
+    W_enc: Float[Tensor, "n_sae d_in d_sae"]
+    _W_dec: Float[Tensor, "n_sae d_sae d_in"] | None
+    b_enc: Float[Tensor, "n_sae d_sae"]
+    b_dec: Float[Tensor, "n_sae d_in"]
 
     def __init__(
         self,
@@ -94,15 +94,15 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
         model: HookedTransformer,
         train_dataset: Dataset,
         test_dataset: Dataset,
+        device: str,
     ):
         super(OthelloSAE, self).__init__()
 
         self.cfg = sae_cfg
+        self.device = device
         self.model = model
-        self.device = model.device
         self.model.requires_grad_(False)
 
-        # TODO batch calculate activations and sample randomly to avoid training batches with tokens from the same game
         self.train_dataset = (
             train_dataset.shuffle(seed=0)
             .take(min(len(train_dataset), self.cfg.n_train * self.cfg.n_epochs))
@@ -116,45 +116,70 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
             .batch(self.cfg.batch_size)
         )
 
+        self.hook_names = [
+            f"blocks.{hook_layer}.{hook_suffix}"
+            for hook_layer, hook_suffix in product(
+                self.cfg.hook_layers, self.cfg.hook_suffixes
+            )
+        ]
+        n_sae = len(self.hook_names)
         self.W_enc = t.nn.Parameter(
-            t.nn.init.kaiming_uniform_(t.empty(self.cfg.d_in, self.cfg.d_sae))
+            t.nn.init.kaiming_uniform_(t.empty(n_sae, self.cfg.d_in, self.cfg.d_sae))
         )
         if self.cfg.tied_weights:
             self.W_dec = None
         else:
             self.W_dec = t.nn.Parameter(
-                t.nn.init.kaiming_uniform_(t.empty(self.cfg.d_sae, self.cfg.d_in))
+                t.nn.init.kaiming_uniform_(
+                    t.empty(n_sae, self.cfg.d_sae, self.cfg.d_in)
+                )
             )
         self.W_dec.data[:] = self.W_dec / self.W_dec.norm(dim=-1, keepdim=True)
-        self.b_enc = t.nn.Parameter(t.zeros(self.cfg.d_sae))
-        self.b_dec = t.nn.Parameter(t.zeros(self.cfg.d_in))
+        self.b_enc = t.nn.Parameter(t.zeros(n_sae, self.cfg.d_sae))
+        self.b_dec = t.nn.Parameter(t.zeros(n_sae, self.cfg.d_in))
 
         self.to(self.device)
 
     @property
-    def W_dec(self) -> Float[Tensor, "d_sae d_in"]:
-        return self._W_dec if self._W_dec is not None else self.W_enc.T
+    def W_dec(self) -> Float[Tensor, "n_sae d_sae d_in"]:
+        return self._W_dec if self._W_dec is not None else self.W_enc.transpose(-2, -1)
 
     @property
-    def W_dec_normalized(self) -> Float[Tensor, "d_sae d_in"]:
+    def W_dec_normalized(self) -> Float[Tensor, "n_sae d_sae d_in"]:
         return self.W_dec / (
             self.W_dec.norm(dim=-1, keepdim=True) + self.cfg.weight_normalize_eps
         )
 
     def forward(
-        self, x: Float[Tensor, "batch d_in"]
+        self, x: Float[Tensor, "batch n_sae d_in"]
     ) -> tuple[
-        dict[str, Float[Tensor, ""]],
-        Float[Tensor, "batch d_sae"],
-        Float[Tensor, "batch d_in"],
+        dict[str, Float[Tensor, "n_sae"]],
+        Float[Tensor, "batch n_sae d_sae"],
+        Float[Tensor, "batch n_sae d_in"],
     ]:
         x_c = x - self.b_dec
-        acts_pre = x_c @ self.W_enc + self.b_enc
+        acts_pre = (
+            einops.einsum(
+                x_c,
+                self.W_enc,
+                "batch n_sae d_in, n_sae d_in d_sae -> batch n_sae d_sae",
+            )
+            + self.b_enc
+        )
         acts_post = t.nn.functional.relu(acts_pre)
-        x_recon = acts_post @ self.W_dec_normalized + self.b_dec
+        x_recon = (
+            einops.einsum(
+                acts_post,
+                self.W_dec_normalized,
+                "batch n_sae d_sae, n_sae d_sae d_in -> batch n_sae d_in",
+            )
+            + self.b_dec
+        )
 
-        l_recon = (x - x_recon).pow(2).mean(-1)  # avg for mse
-        l_sparsity = acts_post.abs().sum(-1)  # sum because ground truth number of features is indep of d_sae
+        l_recon = (x - x_recon).pow(2).mean(-1).mean(0)  # avg for mse
+        l_sparsity = (
+            acts_post.abs().sum(-1).mean(0)
+        )  # sum because ground truth number of features is indep of d_sae
         l_sae = l_recon + self.cfg.sparsity_coeff * l_sparsity
         l_dict = {"L_recon": l_recon, "L_sparsity": l_sparsity, "L_sae": l_sae}
 
@@ -170,15 +195,17 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
 
         for batch in dataset:
             with t.inference_mode():
+                # TODO batch calculate activations and sample randomly to avoid training batches with tokens from the same game
                 input_ids = t.tensor(batch["input_ids"], device=self.device)[:, :-1]
                 _, cache = self.model.run_with_cache(
                     input_ids,
-                    names_filter=self.cfg.hook_name,
-                    stop_at_layer=self.cfg.hook_layer + 1,
+                    names_filter=self.hook_names,
+                    stop_at_layer=max(self.cfg.hook_layers) + 1,
                 )
-                x: Float[Tensor, "(batch pos) d_model"] = cache[
-                    self.cfg.hook_name
-                ].flatten(0, 1).flatten(1)  # second flatten for attn_z
+                x: Float[Tensor, "(batch pos) n_sae d_model"] = t.stack(
+                    [cache[hook_name].flatten(2) for hook_name in self.hook_names],
+                    dim=2,
+                ).flatten(0, 1)  # flatten(2) for attn_z
 
             loss_dict, acts_post, x_recon = self.forward(x)
             data.append(
@@ -191,9 +218,6 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
             )
 
         forward_dict = {k: t.cat([data[k] for data in data], dim=0) for k in data[0]}
-        forward_dict = {
-            k: v.mean(0) if k.startswith("L_") else v for k, v in forward_dict.items()
-        }
 
         if include_weights:
             forward_dict |= {
@@ -214,7 +238,7 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
         optimizer = t.optim.Adam(
             list(self.parameters()), lr=self.cfg.lr, betas=self.cfg.betas
         )
-        n_steps = self.cfg.n_epochs * len(self.train_dataset)
+        n_steps = self.cfg.n_epochs * self.cfg.n_train // self.cfg.batch_size
         progress_bar = tqdm(range(n_steps))
 
         # Create lists of dicts to store data we'll eventually be plotting
@@ -222,6 +246,30 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
         frac_active_in_window = deque(maxlen=self.cfg.resample_window)
 
         for step in progress_bar:
+            # Update learning rate
+            step_lr = self.cfg.lr * self.cfg.lr_scale(step, n_steps)
+            if step % self.cfg.resample_freq < self.cfg.lr_warmup_steps:
+                step_lr *= self.cfg.lr_warmup_scale
+            for group in optimizer.param_groups:
+                group["lr"] = step_lr
+
+            # Optimize
+            step_dataset = self.train_dataset.select([step % len(self.train_dataset)])
+            forward_dict = self.forward_dataset(step_dataset)
+            forward_dict["L_sae"].sum().backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+            # Normalize decoder weights by modifying them directly (if not using tied weights)
+            if not self.cfg.tied_weights:
+                self.W_dec.data = self.W_dec_normalized.data
+
+            # Calculate the mean sparsities over batch dim for each feature
+            active = forward_dict["acts_post"] > 1e-8
+            dead_count_in_batch_per_sae = (~active).all(0).float().sum(-1)
+            frac_active = active.float().mean(0)
+            frac_active_in_window.append(frac_active)
+
             # Resample dead latents
             resample = (
                 (self.cfg.resample_method is not None)
@@ -237,43 +285,22 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
                 elif self.cfg.resample_method == "advanced":
                     raise NotImplementedError
 
-            # Update learning rate
-            step_lr = self.cfg.lr * self.cfg.lr_scale(step, n_steps)
-            if step % self.cfg.resample_freq < self.cfg.lr_warmup_steps:
-                step_lr *= self.cfg.lr_warmup_scale
-            for group in optimizer.param_groups:
-                group["lr"] = step_lr
-
-            # Optimize
-            step_dataset = self.train_dataset.select([step % len(self.train_dataset)])
-            forward_dict = self.forward_dataset(step_dataset)
-            forward_dict["L_sae"].backward()
-            optimizer.step()
-            optimizer.zero_grad()
-
-            # Normalize decoder weights by modifying them directly (if not using tied weights)
-            if not self.cfg.tied_weights:
-                self.W_dec.data = self.W_dec_normalized.data
-
-            # Calculate the mean sparsities over batch dim for each feature
-            active = forward_dict["acts_post"] > 1e-8
-            dead_count = (~active).all(0).float().sum().item()
-            frac_active = active.float().mean(0)
-            frac_active_in_window.append(frac_active)
-
             # Display progress bar, and log a bunch of values for creating plots / animations
-            if not resample and (step % self.cfg.log_steps == 0 or (step + 1 == n_steps)):
-                progress_bar.set_postfix(
+            if not resample and (
+                step % self.cfg.log_steps == 0 or (step + 1 == n_steps)
+            ):
+                postfix_dict = dict(
                     step=step,
                     lr=step_lr,
-                    frac_active=frac_active.mean().item(),
-                    **{
-                        k: v.mean().item()
-                        for k, v in forward_dict.items()
-                        if k.startswith("L_")
-                    },
-                    dead_count=dead_count,
+                    frac_active=frac_active.mean(-1),
+                    **{k: v for k, v in forward_dict.items() if k.startswith("L_")},
+                    dead_count_in_batch=dead_count_in_batch_per_sae,
                 )
+                postfix_dict = {
+                    k: v.mean().item() if type(v) is Tensor else v
+                    for k, v in postfix_dict.items()
+                }
+                progress_bar.set_postfix(postfix_dict)
 
                 if step < self.cfg.log_warmup_steps:
                     continue
@@ -284,27 +311,22 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
                 data_log.append(test_forward_dict)
 
                 if self.cfg.use_wandb:
-                    test_frac_active = (
-                        (test_forward_dict["acts_post"].abs() > 1e-8).float().mean(0)
-                    )
-                    frac_active_list = [[x] for x in test_frac_active.tolist()]
-                    frac_active_table = wandb.Table(
-                        data=frac_active_list, columns=["frac_active"]
-                    )
-                    frac_active_hist = wandb.plot.histogram(
-                        frac_active_table, "frac_active"
-                    )
+                    frac_active_dict = {
+                        f"frac_active_L{layer}_{suffix}": frac_active[i].mean().item()
+                        for i, (layer, suffix) in enumerate(
+                            product(self.cfg.hook_layers, self.cfg.hook_suffixes)
+                        )
+                    }
+                    loss_dict = {
+                        f"{k}_L{layer}_{suffix}": v[i].item()
+                        for k, v in test_forward_dict.items()
+                        for i, (layer, suffix) in enumerate(
+                            product(self.cfg.hook_layers, self.cfg.hook_suffixes)
+                        )
+                        if k.startswith("L_")
+                    }
                     wandb.log(
-                        {
-                            "lr": step_lr,
-                            "frac_active": frac_active.mean().item(),
-                            "frac_active_histogram": frac_active_hist,
-                            **{
-                                k: v.item()
-                                for k, v in test_forward_dict.items()
-                                if k.startswith("L_")
-                            },
-                        },
+                        {"lr": step_lr, **frac_active_dict, **loss_dict},
                         step=step,
                     )
 
@@ -316,7 +338,7 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
     @t.no_grad()
     def resample_simple(
         self,
-        frac_active_in_window: Float[Tensor, "window d_sae"],
+        frac_active_in_window: Float[Tensor, "window n_sae d_sae"],
         resample_scale: float,
     ) -> None:
         """
@@ -328,9 +350,8 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
             - Set b_enc to be zero, at each dead neuron
         """
         dead_neurons = (frac_active_in_window < 1e-8).all(0)
-        dead_neurons_count = dead_neurons.sum().item()
         print(
-            f"Resampling {dead_neurons_count}/{dead_neurons.shape[0]} dead neurons..."
+            f"Resampling {dead_neurons.sum().item()}/{dead_neurons.numel()} dead neurons..."
         )
         resampled_neurons = t.randn(
             dead_neurons.sum(), self.cfg.d_in, device=self.W_dec.device
@@ -339,5 +360,7 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
             resampled_neurons.norm(dim=-1, keepdim=True) + self.cfg.weight_normalize_eps
         )
         self.W_dec.data[dead_neurons] = resampled_neurons
-        self.W_enc.data.T[dead_neurons] = resampled_neurons * resample_scale
+        self.W_enc.data.transpose(-2, -1)[dead_neurons] = (
+            resampled_neurons * resample_scale
+        )
         self.b_enc.data[dead_neurons] = 0
