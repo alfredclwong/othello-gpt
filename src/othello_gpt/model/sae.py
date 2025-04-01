@@ -124,21 +124,23 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
                 self.cfg.hook_layers, self.cfg.hook_suffixes
             )
         ]
-        n_sae = len(self.hook_names)
+        self.n_sae = len(self.hook_names)
         self.W_enc = t.nn.Parameter(
-            t.nn.init.kaiming_uniform_(t.empty(n_sae, self.cfg.d_in, self.cfg.d_sae))
+            t.nn.init.kaiming_uniform_(
+                t.empty(self.n_sae, self.cfg.d_in, self.cfg.d_sae)
+            )
         )
         if self.cfg.tied_weights:
             self.W_dec = None
         else:
             self.W_dec = t.nn.Parameter(
                 t.nn.init.kaiming_uniform_(
-                    t.empty(n_sae, self.cfg.d_sae, self.cfg.d_in)
+                    t.empty(self.n_sae, self.cfg.d_sae, self.cfg.d_in)
                 )
             )
         self.W_dec.data[:] = self.W_dec / self.W_dec.norm(dim=-1, keepdim=True)
-        self.b_enc = t.nn.Parameter(t.zeros(n_sae, self.cfg.d_sae))
-        self.b_dec = t.nn.Parameter(t.zeros(n_sae, self.cfg.d_in))
+        self.b_enc = t.nn.Parameter(t.zeros(self.n_sae, self.cfg.d_sae))
+        self.b_dec = t.nn.Parameter(t.zeros(self.n_sae, self.cfg.d_in))
 
         self.to(self.device)
 
@@ -236,9 +238,9 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
         )
 
         l_recon = (x - x_recon).pow(2).mean(-1)  # avg for mse
-        l_sparsity = acts_post.abs().sum(
-            -1
-        )  # sum because ground truth number of features is indep of d_sae
+        l_recon /= x.norm(dim=-1).mean(0, keepdim=True)
+        l_sparsity = acts_post.abs().sum(-1)
+        # sum because ground truth number of features is indep of d_sae
         l_sae = l_recon + self.cfg.sparsity_coeff * l_sparsity
         l_dict = {"L_recon": l_recon, "L_sparsity": l_sparsity, "L_sae": l_sae}
 
@@ -348,7 +350,13 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
                 step % self.cfg.log_steps == 0 or (step + 1 == n_steps)
             ):
                 eval_dict = self.evaluate()
-                eval_groups = ["L_recon", "L_sparsity", "L_sae", "n_dead", "loss_recovered"]
+                eval_groups = [
+                    "L_recon",
+                    "L_sparsity",
+                    "L_sae",
+                    "n_dead",
+                    "loss_recovered",
+                ]
                 avg_eval_dict = {
                     k: sum(
                         eval_dict[f"{k}_{hook_name}"] for hook_name in self.hook_names

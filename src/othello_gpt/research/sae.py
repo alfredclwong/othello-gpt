@@ -13,6 +13,7 @@ from othello_gpt.data.vis import move_id_to_text, plot_game
 from othello_gpt.util import load_model, load_probes, get_all_squares
 from othello_gpt.model.sae import OthelloSAE, OthelloSAEConfig
 import datasets
+from itertools import product
 
 # %%
 device = t.device(
@@ -72,7 +73,7 @@ probes["pos"] = t.nn.functional.pad(
 # %%
 sae_cfg = OthelloSAEConfig(
     d_in=model.cfg.d_model,
-    d_sae=2048,
+    d_sae=1024,
     hook_layers=list(range(model.cfg.n_layers)),
     hook_suffixes=["attn.hook_z", "hook_mlp_out"],
 )
@@ -84,68 +85,85 @@ sae = OthelloSAE.from_pretrained(
     test_dataset=test_dataset,
     device=device,
 )
-
-# %%
-sae.evaluate()
-
-# %%
-sae = saes["blocks.5.hook_mlp_out"]
-
+eval_dict = sae.evaluate()
 with t.inference_mode():
-    test_forward_dict = sae.forward_dataset(sae.test_dataset.take(8))
-
-# attn.hook_z is (batch, pos, n_head, d_head)
-# model.W_O[sae_layer] is (n_head, d_head, d_model)
-
-attn_sae = "attn" in sae.cfg.hook_name
-post_matrix = sae.model.W_O[sae_layer].flatten(0, 1) if attn_sae else t.eye(sae.model.cfg.d_model, device=device)
-post_matrix /= post_matrix.norm(dim=-1, keepdim=True)
-test_forward_dict["x"] = test_forward_dict["x"] @ post_matrix
-test_forward_dict["x_recon"] = test_forward_dict["x_recon"] @ post_matrix
+    test_forward_dict = sae.forward_dataset(sae.train_dataset.take(12))
 
 # %%
-acts_post_sample = (
-    test_forward_dict["acts_post"]
-    .reshape(-1, sae.model.cfg.n_ctx, sae.cfg.d_sae)
-    .cpu()
+# Result visualisation
+# 1. Loss recovered
+# 2. x norms, error norms
+# 3. Latent activity
+# 4. Self colinearity, linear probe colinearity
+# 5. Max activating datasets
+
+# %%
+# Analysis
+# 1. Binary feature pairs
+# 2. Feature geometry
+# 3. Feature circuits
+# 4.
+
+# %%
+{k: eval_dict[k] for k in sorted(eval_dict.keys())}
+
+# %%
+x_norms = dict(
+    zip(sae.hook_names, test_forward_dict["x"].norm(dim=-1).mean(0).tolist())
 )
-frac_active = (acts_post_sample.abs() > 1e-8).float().flatten(0, 1).mean(0)
-sorted_latent_idxs = t.argsort(frac_active, descending=True)
-first_dead_latent_idx = t.argmax((frac_active[sorted_latent_idxs] < 1e-8).float()).item()
-if first_dead_latent_idx > 0:
-    sorted_latent_idxs = sorted_latent_idxs[:first_dead_latent_idx]
-print(sorted_latent_idxs)
+x_recon_norms = dict(
+    zip(sae.hook_names, test_forward_dict["x_recon"].norm(dim=-1).mean(0).tolist())
+)
+# L5 mlp out is massive! hypothesis: empty and legal are same direction, but legal gets
+# evidence-boosted to a much higher magnitude for softmax
+# so should we have magnitude-range based features? don't think this is necessary - we
+# can have both empty and legal being co-active above threshold, this actually prevents splitting
+x_norms, x_recon_norms
+
+# %%
+acts_post = test_forward_dict["acts_post"].reshape(
+    -1, sae.model.cfg.n_ctx, sae.n_sae, sae.cfg.d_sae
+)
+frac_active = (acts_post > 1e-8).float().flatten(0, 1).mean(0)
+sorted_latent_idxs = t.argsort(frac_active, dim=-1, descending=True)
 
 fig = make_subplots(
-    rows=2,
-    cols=1,
+    rows=sae.n_sae,
+    cols=2,
     shared_xaxes=True,
-    row_heights=[0.75, 0.25],
-    vertical_spacing=0.05,
-    subplot_titles=("Heatmap", "Fraction Active Scatter Plot"),
+    subplot_titles=[
+        f"{h} {t}" for h, t in product(sae.hook_names, ["acts", "frac_active"])
+    ],
 )
-
-fig.add_trace(
-    go.Heatmap(
-        z=acts_post_sample[:100, :, sorted_latent_idxs].flatten(0, 1),
-    ),
-    row=1,
-    col=1,
+for i, hook_name in enumerate(sae.hook_names):
+    fig.add_trace(
+        go.Heatmap(
+            z=acts_post[:10, :, i, sorted_latent_idxs[i]].flatten(0, 1).cpu(),
+            showscale=False,
+        ),
+        row=i + 1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(y=frac_active[i, sorted_latent_idxs[i]].cpu(), showlegend=False),
+        row=i + 1,
+        col=2,
+    )
+fig.update_layout(
+    height=200 * sae.n_sae,
 )
-
-fig.add_trace(
-    go.Scatter(
-        y=frac_active[sorted_latent_idxs],
-    ),
-    row=2,
-    col=1,
-)
-
 fig.show()
 
 # %%
-latents_normed = sae.W_dec_normalized[sorted_latent_idxs] @ post_matrix
+latents_normed = sae.W_dec_normalized.clone()
+for i, hook_name in enumerate(sae.hook_names):
+    latents_normed[i] = latents_normed[i, sorted_latent_idxs[i]]
+    if "hook_z" in hook_name:
+        hook_layer = int(hook_name[len("blocks.")][0])
+        latents_normed[i] @= sae.model.W_O[hook_layer].flatten(0, 1)
 latents_normed /= latents_normed.norm(dim=-1, keepdim=True)
+latents_normed = latents_normed.flatten(0, 1)
+
 colinear_keys = ["ee", "+t-m", "c", "mov", "b", "u", "p", "l", "pos"]
 probes_normed = t.cat([probes[k][..., 3] for k in colinear_keys], dim=1)
 probe_suffixes = {
@@ -220,14 +238,16 @@ fig.update_layout(
 )
 fig.show()
 
-# Find all pairs of latents with colinearity > 0.99
-threshold = 0.99
-high_colinearity_pairs = t.nonzero(self_colinearity_matrix > threshold, as_tuple=False)
+# # Find all pairs of latents with colinearity > 0.99
+# threshold = 0.99
+# high_colinearity_pairs = t.nonzero(self_colinearity_matrix > threshold, as_tuple=False)
 
-# Print the results
-for pair in high_colinearity_pairs:
-    latent1, latent2 = pair.tolist()
-    print(f"Latent {sorted_latent_idxs[latent1]} and Latent {sorted_latent_idxs[latent2]} have colinearity {self_colinearity_matrix[latent1, latent2]} > {threshold}")
+# # Print the results
+# for pair in high_colinearity_pairs:
+#     latent1, latent2 = pair.tolist()
+#     print(
+#         f"Latent {sorted_latent_idxs[latent1]} and Latent {sorted_latent_idxs[latent2]} have colinearity {self_colinearity_matrix[latent1, latent2]} > {threshold}"
+#     )
 
 fig = go.Figure()
 fig.add_trace(
@@ -237,9 +257,7 @@ fig.add_trace(
         # y=sorted_latent_idxs.tolist(),
     )
 )
-fig.update_layout(
-    title=f"{sae_name} latent alignment with linear probes"
-)
+fig.update_layout(title="Latent alignment with linear probes")
 fig.show()
 
 # Get the 10 highest absolute values in colinearity_matrix and their corresponding (y, x) pairs
@@ -249,15 +267,24 @@ top_abs_values, top_indices = t.topk(abs_colinearity.flatten(), k=top_k)
 top_values = colinearity_matrix.flatten()[top_indices]
 
 # Convert flat indices to (y, x) pairs
-top_yx_pairs = [(idx // abs_colinearity.shape[1], idx % abs_colinearity.shape[1]) for idx in top_indices]
+top_yx_pairs = [
+    (idx // abs_colinearity.shape[1], idx % abs_colinearity.shape[1])
+    for idx in top_indices
+]
 
 # Print the results
 for i, (value, (y, x)) in enumerate(zip(top_values, top_yx_pairs)):
-    print(f"Value #{i}: {value.item()}, (y, x): ({sorted_latent_idxs[y]}, {probe_bases_labels[x]}), frac_active {frac_active[sorted_latent_idxs[y]]}")
+    print(
+        f"Value #{i}: {value.item()}, (y, x): ({sorted_latent_idxs[y]}, {probe_bases_labels[x]}), frac_active {frac_active[sorted_latent_idxs[y]]}"
+    )
+
 
 # %%
 def visualise_dataset_activations(
-    sae: OthelloSAE, latent_idx: int, dataset: Dataset | None = None, topk: int = 3,
+    sae: OthelloSAE,
+    latent_idx: int,
+    dataset: Dataset | None = None,
+    topk: int = 3,
 ):
     # Main display: text games
     # Hover/select: plot game
@@ -288,6 +315,7 @@ def visualise_dataset_activations(
     for i, d in enumerate(dataset):
         plot_game(d)
         print(acts_post[i])
+
 
 # latent_idx = sorted_latent_idxs[100].item()
 latent_idx = 1336
@@ -320,7 +348,11 @@ for _ in tqdm(range(8)):
         for j in range(w_ep.shape[0]):
             if j == i:
                 continue
-            projection = (w_ep_basis[i] @ w_ep_basis[j]) / (w_ep_basis[j] @ w_ep_basis[j]) * w_ep_basis[j]
+            projection = (
+                (w_ep_basis[i] @ w_ep_basis[j])
+                / (w_ep_basis[j] @ w_ep_basis[j])
+                * w_ep_basis[j]
+            )
             w_ep_basis[i] -= projection
 
 fig = go.Figure()
@@ -363,18 +395,3 @@ fig.add_trace(
     )
 )
 fig.show()
-
-# %%
-# Result visualisation
-# 1. Loss recovered
-# 2. x norms, error norms
-# 3. Latent activity
-# 4. Self colinearity, linear probe colinearity
-# 5. Max activating datasets
-
-# %%
-# Analysis
-# 1. Binary feature pairs
-# 2. Feature geometry
-# 3. Feature circuits
-# 4. 
