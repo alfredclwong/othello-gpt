@@ -218,7 +218,7 @@ def load_probes(
     return probes
 
 
-def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True):
+def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True) -> HookedTransformer:
     class HubGPT(GPT, hf.PyTorchModelHubMixin):
         pass
 
