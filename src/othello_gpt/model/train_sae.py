@@ -38,12 +38,13 @@ sae_cfg = OthelloSAEConfig(
     hook_layers=list(range(model.cfg.n_layers)),
     hook_suffixes=["attn.hook_z", "hook_mlp_out"],
     use_wandb=True,
-    n_epochs=2,
-    n_train=300*128,
+    n_epochs=8,
+    n_train=14000*128,
     batch_size=128,
-    resample_freq=100,
-    resample_window=100,
-    log_steps=100,
+    resample_freq=14000,
+    resample_window=2000,
+    log_steps=1000,
+    sparsity_coeff=0.1,
 )
 print(sae_cfg)
 sae = OthelloSAE(sae_cfg, model, train_dataset, test_dataset, device)

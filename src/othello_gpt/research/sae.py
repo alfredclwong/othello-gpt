@@ -4,7 +4,6 @@ from pathlib import Path
 import torch as t
 from datasets import Dataset, load_dataset
 from tqdm import tqdm
-from transformer_lens.hook_points import HookPoint
 import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
@@ -71,72 +70,23 @@ probes["pos"] = t.nn.functional.pad(
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
 
 # %%
-saes = {}
-for sae_layer in range(model.cfg.n_layers):
-    for hook_suffix in ["attn.hook_z", "hook_mlp_out"]:
-        hook_name = f"blocks.{sae_layer}.{hook_suffix}"
-        sae_cfg = OthelloSAEConfig(
-            hook_name=hook_name,
-            hook_layer=sae_layer,
-            d_sae=2048,
-        )
-        sae_name = f"{model_name}-sae-{sae_cfg.hook_name}"
-        saes[hook_name] = OthelloSAE.from_pretrained(
-            sae_name,
-            sae_cfg=sae_cfg,
-            model=model,
-            train_dataset=train_dataset,
-            test_dataset=test_dataset,
-        )
+sae_cfg = OthelloSAEConfig(
+    d_in=model.cfg.d_model,
+    d_sae=2048,
+    hook_layers=list(range(model.cfg.n_layers)),
+    hook_suffixes=["attn.hook_z", "hook_mlp_out"],
+)
+sae = OthelloSAE.from_pretrained(
+    f"{model_name}-sae",
+    sae_cfg=sae_cfg,
+    model=model,
+    train_dataset=train_dataset,
+    test_dataset=test_dataset,
+    device=device,
+)
 
 # %%
-def zero_ablation_hook(x, hook: HookPoint):
-    return t.zeros_like(x)
-
-def mean_ablation_hook(x, hook: HookPoint):
-    return x.mean(dim=0, keepdim=True)
-
-def sae_hook(x, hook: HookPoint):
-    _, _, x_recon = sae.forward(x.flatten(2))
-    return x_recon.reshape_as(x)
-
-# Run forward passes with different setups and collect model loss terms
-batch = test_dataset.take(1024)
-input_ids = t.tensor(batch["input_ids"], device=device)[:, :-1]
-
-for hook_name, sae in saes.items():
-    with t.inference_mode():
-        # Setup 1: SAE x_recon vectors patched in
-        model.reset_hooks()
-        loss_recon = model.run_with_hooks(
-            input_ids,
-            return_type="loss",
-            fwd_hooks=[(sae.cfg.hook_name, sae_hook)],
-        )
-
-        # Setup 2: Zero vectors patched in
-        model.reset_hooks()
-        loss_zero = model.run_with_hooks(
-            input_ids,
-            return_type="loss",
-            fwd_hooks=[(sae.cfg.hook_name, zero_ablation_hook)],
-        )
-
-        # Setup 3: Mean vectors patched in
-        model.reset_hooks()
-        loss_mean = model.run_with_hooks(
-            input_ids,
-            return_type="loss",
-            fwd_hooks=[(sae.cfg.hook_name, mean_ablation_hook)],
-        )
-
-        # Setup 4: No alterations
-        model.reset_hooks()
-        loss_original = model(input_ids, return_type="loss")
-
-    loss_recovered_zero = (1 - (loss_recon - loss_original) / (loss_zero - loss_original)).mean().item()
-    loss_recovered_mean = (1 - (loss_recon - loss_original) / (loss_mean - loss_original)).mean().item()
-    print(hook_name, f"{loss_recovered_zero:.4f}", f"{loss_recovered_mean:.4f}")
+sae.evaluate()
 
 # %%
 sae = saes["blocks.5.hook_mlp_out"]

@@ -8,10 +8,12 @@ import torch as t
 import huggingface_hub as hf
 from datasets import Dataset
 from transformer_lens import HookedTransformer
+from transformer_lens.hook_points import HookPoint
 import wandb
 from tqdm import tqdm
 import einops
 from itertools import product
+import pandas as pd
 
 
 def linear_lr(step, steps):
@@ -67,7 +69,7 @@ class OthelloSAEConfig:
     n_epochs: int = 8
 
     log_steps: int = 1000
-    log_warmup_steps: int = 10
+    log_warmup_steps: int = 100
 
     lr: float = 1e-3
     lr_scale: Callable[[int, int], float] = cosine_decay_lr
@@ -150,10 +152,67 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
             self.W_dec.norm(dim=-1, keepdim=True) + self.cfg.weight_normalize_eps
         )
 
+    def evaluate(self):
+        eval_dict = {}
+
+        test_forward_dict = self.forward_dataset(self.test_dataset)
+        dead_latent_count = (test_forward_dict["acts_post"] < 1e-8).all(0).sum(-1)
+        frac_active = (test_forward_dict["acts_post"] >= 1e-8).float().mean(0).mean(-1)
+        test_input_ids = t.cat(
+            [
+                t.tensor(d["input_ids"], device=self.device)[:, :-1]
+                for d in self.test_dataset
+            ],
+            dim=0,
+        )
+
+        def zero_ablation_hook(x, hook: HookPoint):
+            return t.zeros_like(x)
+
+        def sae_hook(x, hook: HookPoint, sae_index: int):
+            return test_forward_dict["x_recon"][:, sae_index].reshape_as(x)
+
+        for i, hook_name in enumerate(self.hook_names):
+            loss_dict = {
+                f"{k}_{hook_name}": v[:, i].mean(0).item()
+                for k, v in test_forward_dict.items()
+                if k.startswith("L_")
+            }
+            eval_dict.update(loss_dict)
+            eval_dict[f"n_dead_{hook_name}"] = dead_latent_count[i].item()
+            eval_dict[f"frac_active_{hook_name}"] = frac_active[i].item()
+
+            with t.inference_mode():
+                self.model.reset_hooks()
+                loss_recon = self.model.run_with_hooks(
+                    test_input_ids,
+                    return_type="loss",
+                    fwd_hooks=[(hook_name, lambda x, hook: sae_hook(x, hook, i))],
+                )
+
+                self.model.reset_hooks()
+                loss_zero = self.model.run_with_hooks(
+                    test_input_ids,
+                    return_type="loss",
+                    fwd_hooks=[(hook_name, zero_ablation_hook)],
+                )
+
+                self.model.reset_hooks()
+                loss_original = self.model(test_input_ids, return_type="loss")
+
+            loss_recovered_zero = (
+                (1 - (loss_recon - loss_original) / (loss_zero - loss_original))
+                .mean()
+                .item()
+            )
+            eval_dict[f"loss_recovered_{hook_name}"] = loss_recovered_zero
+
+        return eval_dict
+
     def forward(
         self, x: Float[Tensor, "batch n_sae d_in"]
     ) -> tuple[
-        dict[str, Float[Tensor, "n_sae"]],
+        dict[str, Float[Tensor, "batch n_sae"]],
         Float[Tensor, "batch n_sae d_sae"],
         Float[Tensor, "batch n_sae d_in"],
     ]:
@@ -176,9 +235,9 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
             + self.b_dec
         )
 
-        l_recon = (x - x_recon).pow(2).mean(-1).mean(0)  # avg for mse
-        l_sparsity = (
-            acts_post.abs().sum(-1).mean(0)
+        l_recon = (x - x_recon).pow(2).mean(-1)  # avg for mse
+        l_sparsity = acts_post.abs().sum(
+            -1
         )  # sum because ground truth number of features is indep of d_sae
         l_sae = l_recon + self.cfg.sparsity_coeff * l_sparsity
         l_dict = {"L_recon": l_recon, "L_sparsity": l_sparsity, "L_sae": l_sae}
@@ -227,7 +286,7 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
 
         return forward_dict
 
-    def optimize(self) -> list[dict[str, Any]]:
+    def optimize(self, log_data: bool = False) -> list[dict[str, Any]]:
         # TODO separate into a trainer class/func
 
         assert self.cfg.resample_window <= self.cfg.resample_freq
@@ -256,7 +315,7 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
             # Optimize
             step_dataset = self.train_dataset.select([step % len(self.train_dataset)])
             forward_dict = self.forward_dataset(step_dataset)
-            forward_dict["L_sae"].sum().backward()
+            forward_dict["L_sae"].mean(0).sum().backward()
             optimizer.step()
             optimizer.zero_grad()
 
@@ -266,7 +325,6 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
 
             # Calculate the mean sparsities over batch dim for each feature
             active = forward_dict["acts_post"] > 1e-8
-            dead_count_in_batch_per_sae = (~active).all(0).float().sum(-1)
             frac_active = active.float().mean(0)
             frac_active_in_window.append(frac_active)
 
@@ -286,47 +344,33 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
                     raise NotImplementedError
 
             # Display progress bar, and log a bunch of values for creating plots / animations
-            if not resample and (
+            if not (step % self.cfg.resample_freq < self.cfg.log_warmup_steps) and (
                 step % self.cfg.log_steps == 0 or (step + 1 == n_steps)
             ):
-                postfix_dict = dict(
-                    step=step,
-                    lr=step_lr,
-                    frac_active=frac_active.mean(-1),
-                    **{k: v for k, v in forward_dict.items() if k.startswith("L_")},
-                    dead_count_in_batch=dead_count_in_batch_per_sae,
-                )
-                postfix_dict = {
-                    k: v.mean().item() if type(v) is Tensor else v
-                    for k, v in postfix_dict.items()
+                eval_dict = self.evaluate()
+                eval_groups = ["L_recon", "L_sparsity", "L_sae", "n_dead", "loss_recovered"]
+                avg_eval_dict = {
+                    k: sum(
+                        eval_dict[f"{k}_{hook_name}"] for hook_name in self.hook_names
+                    )
+                    / len(self.hook_names)
+                    for k in eval_groups
                 }
-                progress_bar.set_postfix(postfix_dict)
 
-                if step < self.cfg.log_warmup_steps:
-                    continue
+                progress_bar.set_postfix(
+                    {
+                        "step": step,
+                        "lr": step_lr,
+                        **avg_eval_dict,
+                    }
+                )
 
-                with t.inference_mode():
-                    test_forward_dict = self.forward_dataset(self.test_dataset)
-                test_forward_dict = {k: v.cpu() for k, v in test_forward_dict.items()}
-                data_log.append(test_forward_dict)
+                if log_data:
+                    data_log.append(eval_dict | avg_eval_dict)
 
                 if self.cfg.use_wandb:
-                    frac_active_dict = {
-                        f"frac_active_L{layer}_{suffix}": frac_active[i].mean().item()
-                        for i, (layer, suffix) in enumerate(
-                            product(self.cfg.hook_layers, self.cfg.hook_suffixes)
-                        )
-                    }
-                    loss_dict = {
-                        f"{k}_L{layer}_{suffix}": v[i].item()
-                        for k, v in test_forward_dict.items()
-                        for i, (layer, suffix) in enumerate(
-                            product(self.cfg.hook_layers, self.cfg.hook_suffixes)
-                        )
-                        if k.startswith("L_")
-                    }
                     wandb.log(
-                        {"lr": step_lr, **frac_active_dict, **loss_dict},
+                        {"lr": step_lr, **eval_dict},
                         step=step,
                     )
 
