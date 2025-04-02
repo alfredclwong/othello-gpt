@@ -6,14 +6,16 @@ from datasets import Dataset, load_dataset
 from tqdm import tqdm
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
+from jaxtyping import Float
+from torch.types import Tensor
 
 from othello_gpt.data.vis import move_id_to_text, plot_game
 from othello_gpt.util import load_model, load_probes, get_all_squares
 from othello_gpt.model.sae import OthelloSAE, OthelloSAEConfig
 import datasets
 from itertools import product
+import numpy as np
 
 # %%
 device = t.device(
@@ -68,6 +70,19 @@ probes["pos"] = t.nn.functional.pad(
     probes["pos"], (0, 0, 0, size * size - probes["pos"].shape[1]), value=float("nan")
 )
 
+probe_keys = ["ee", "+t-m", "c", "mov", "b", "u", "p", "l", "pos"]
+probes_normed: Float[Tensor, "d_model n_probe"] = t.cat(
+    [probes[k][..., 3] for k in probe_keys], dim=1
+)
+probe_suffixes = {
+    k: [
+        f"{i if k in ['p', 'pr'] else move_id_to_text(i, size)}"
+        for i in actually_all_squares
+    ]
+    for k in probe_keys
+}
+probe_bases_labels = [f"{k}_{s}" for k in probe_keys for s in probe_suffixes[k]]
+
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
 
 # %%
@@ -86,8 +101,9 @@ sae = OthelloSAE.from_pretrained(
     device=device,
 )
 eval_dict = sae.evaluate()
+dataset = sae.test_dataset
 with t.inference_mode():
-    test_forward_dict = sae.forward_dataset(sae.train_dataset.take(12))
+    test_forward_dict = sae.forward_dataset(dataset)
 
 # %%
 # Result visualisation
@@ -155,243 +171,217 @@ fig.update_layout(
 fig.show()
 
 # %%
-latents_normed = sae.W_dec_normalized.clone()
+latents_normed: Float[Tensor, "n_sae d_sae d_in"] = (
+    sae.W_dec_normalized.detach().clone()
+)
 for i, hook_name in enumerate(sae.hook_names):
     latents_normed[i] = latents_normed[i, sorted_latent_idxs[i]]
     if "hook_z" in hook_name:
         hook_layer = int(hook_name[len("blocks.")][0])
         latents_normed[i] @= sae.model.W_O[hook_layer].flatten(0, 1)
 latents_normed /= latents_normed.norm(dim=-1, keepdim=True)
-latents_normed = latents_normed.flatten(0, 1)
+flat_latents_normed = latents_normed.flatten(0, 1)
 
-colinear_keys = ["ee", "+t-m", "c", "mov", "b", "u", "p", "l", "pos"]
-probes_normed = t.cat([probes[k][..., 3] for k in colinear_keys], dim=1)
-probe_suffixes = {
-    k: [
-        f"{i if k in ['p', 'pr'] else move_id_to_text(i, size)}"
-        for i in actually_all_squares
-    ]
-    for k in colinear_keys
-}
-probe_bases_labels = [f"{k}_{s}" for k in colinear_keys for s in probe_suffixes[k]]
-
-self_colinearity_matrix = (latents_normed @ latents_normed.T).detach().cpu()
+self_colinearity_matrix = flat_latents_normed @ flat_latents_normed.T
 self_colinearity_matrix = t.tril(self_colinearity_matrix, diagonal=-1)
-colinearity_matrix = (latents_normed @ probes_normed).detach().cpu()
+colinearity_matrix = latents_normed @ probes_normed
+flat_colinearity_matrix = colinearity_matrix.flatten(0, 1)
 
 # Generate random vectors for comparison
-num_random_vectors = 1000
-random_vectors = t.randn(num_random_vectors, latents_normed.shape[1])
+random_vectors = t.randn_like(flat_latents_normed)
 random_vectors /= random_vectors.norm(dim=-1, keepdim=True)
 random_colinearity_matrix = (random_vectors @ random_vectors.T).abs()
 random_colinearity_matrix = t.tril(random_colinearity_matrix, diagonal=-1)
 
 # Calculate the maximum values along the 0th dimension
 self_max_values = self_colinearity_matrix.max(0)[0].cpu().numpy()
-max_values = colinearity_matrix.max(0)[0].cpu().numpy()
-random_max_values = random_colinearity_matrix.max(0)[0]
+max_values = flat_colinearity_matrix.max(0)[0].cpu().numpy()
+random_max_values = random_colinearity_matrix.max(0)[0].cpu().numpy()
 
-# Create a DataFrame for the histogram
-self_df = pd.DataFrame({"Maximum Colinearity": self_max_values})
-df = pd.DataFrame({"Maximum Colinearity": max_values})
-random_df = pd.DataFrame({"Maximum Colinearity": random_max_values})
+# %%
+# # Create a DataFrame for the histogram
+# self_df = pd.DataFrame({"Maximum Colinearity": self_max_values})
+# df = pd.DataFrame({"Maximum Colinearity": max_values})
+# random_df = pd.DataFrame({"Maximum Colinearity": random_max_values})
 
-random_fig = px.histogram(
-    random_df,
-    x="Maximum Colinearity",
-    nbins=50,
-    title="Histogram of Maximum Random Colinearity Values",
-    labels={"Maximum Colinearity": "Maximum Colinearity"},
-)
-random_fig.update_layout(
-    xaxis_title="Maximum Colinearity",
-    yaxis_title="Frequency",
-    bargap=0.1,
-)
-random_fig.show()
+# random_fig = px.histogram(
+#     random_df,
+#     x="Maximum Colinearity",
+#     nbins=50,
+#     title="Histogram of Maximum Random Colinearity Values",
+#     labels={"Maximum Colinearity": "Maximum Colinearity"},
+# )
+# random_fig.update_layout(
+#     xaxis_title="Maximum Colinearity",
+#     yaxis_title="Frequency",
+#     bargap=0.1,
+# )
+# random_fig.show()
 
-fig = px.histogram(
-    df,
-    x="Maximum Colinearity",
-    nbins=50,
-    title="Histogram of Maximum Colinearity Values",
-    labels={"Maximum Colinearity": "Maximum Colinearity"},
-)
-fig.update_layout(
-    xaxis_title="Maximum Colinearity",
-    yaxis_title="Frequency",
-    bargap=0.1,
-)
-fig.show()
+# fig = px.histogram(
+#     df,
+#     x="Maximum Colinearity",
+#     nbins=50,
+#     title="Histogram of Maximum Colinearity Values",
+#     labels={"Maximum Colinearity": "Maximum Colinearity"},
+# )
+# fig.update_layout(
+#     xaxis_title="Maximum Colinearity",
+#     yaxis_title="Frequency",
+#     bargap=0.1,
+# )
+# fig.show()
 
-fig = px.histogram(
-    self_df,
-    x="Maximum Colinearity",
-    nbins=50,
-    title="Histogram of Maximum Self-Colinearity Values",
-    labels={"Maximum Colinearity": "Maximum Colinearity"},
-)
-fig.update_layout(
-    xaxis_title="Maximum Colinearity",
-    yaxis_title="Frequency",
-    bargap=0.1,
-)
-fig.show()
+# fig = px.histogram(
+#     self_df,
+#     x="Maximum Colinearity",
+#     nbins=50,
+#     title="Histogram of Maximum Self-Colinearity Values",
+#     labels={"Maximum Colinearity": "Maximum Colinearity"},
+# )
+# fig.update_layout(
+#     xaxis_title="Maximum Colinearity",
+#     yaxis_title="Frequency",
+#     bargap=0.1,
+# )
+# fig.show()
 
-# # Find all pairs of latents with colinearity > 0.99
-# threshold = 0.99
-# high_colinearity_pairs = t.nonzero(self_colinearity_matrix > threshold, as_tuple=False)
-
-# # Print the results
-# for pair in high_colinearity_pairs:
-#     latent1, latent2 = pair.tolist()
-#     print(
-#         f"Latent {sorted_latent_idxs[latent1]} and Latent {sorted_latent_idxs[latent2]} have colinearity {self_colinearity_matrix[latent1, latent2]} > {threshold}"
+# fig = go.Figure()
+# fig.add_trace(
+#     go.Heatmap(
+#         z=flat_colinearity_matrix.cpu(),
+#         x=probe_bases_labels,
+#         # y=sorted_latent_idxs.tolist(),
 #     )
+# )
+# fig.update_layout(title="Latent alignment with linear probes")
+# fig.show()
 
-fig = go.Figure()
-fig.add_trace(
-    go.Heatmap(
-        z=colinearity_matrix,
-        x=probe_bases_labels,
-        # y=sorted_latent_idxs.tolist(),
-    )
-)
-fig.update_layout(title="Latent alignment with linear probes")
-fig.show()
-
-# Get the 10 highest absolute values in colinearity_matrix and their corresponding (y, x) pairs
-top_k = 200
+# %%
+top_k = 3
 abs_colinearity = colinearity_matrix.abs().nan_to_num(0)
-top_abs_values, top_indices = t.topk(abs_colinearity.flatten(), k=top_k)
-top_values = colinearity_matrix.flatten()[top_indices]
-
-# Convert flat indices to (y, x) pairs
-top_yx_pairs = [
-    (idx // abs_colinearity.shape[1], idx % abs_colinearity.shape[1])
-    for idx in top_indices
-]
-
-# Print the results
-for i, (value, (y, x)) in enumerate(zip(top_values, top_yx_pairs)):
-    print(
-        f"Value #{i}: {value.item()}, (y, x): ({sorted_latent_idxs[y]}, {probe_bases_labels[x]}), frac_active {frac_active[sorted_latent_idxs[y]]}"
-    )
-
+for i, hook_name in enumerate(sae.hook_names):
+    _, top_indices = t.topk(abs_colinearity[i].flatten(), k=top_k)
+    for k, idx in enumerate(top_indices):
+        colinearity = colinearity_matrix[i].flatten()[idx].item()
+        latent_idx, probe_idx = divmod(idx.item(), colinearity_matrix.shape[-1])
+        pct_active = frac_active[i, sorted_latent_idxs[i, latent_idx]]
+        print(
+            f"{hook_name} #{k}: {colinearity=:.2f}, {latent_idx=}, {probe_bases_labels[probe_idx]}, {pct_active=:.2%}"
+        )
 
 # %%
-def visualise_dataset_activations(
-    sae: OthelloSAE,
-    latent_idx: int,
-    dataset: Dataset | None = None,
-    topk: int = 3,
-):
-    # Main display: text games
-    # Hover/select: plot game
-    if dataset is None:
-        dataset = sae.test_dataset
+# Given (sae_idx, latent_idx), find the max activating datasets and plot the games with activation values
+top_k = 3
+sae_idx = 1
+latent_idx = sorted_latent_idxs[sae_idx, 326]
+max_act_per_game = acts_post[..., sae_idx, latent_idx].max(dim=1)[0]
+_, top_game_idxs = t.topk(max_act_per_game, k=top_k)
+flat_dataset = datasets.concatenate_datasets([Dataset.from_dict(d) for d in dataset])
+for game_idx in top_game_idxs.tolist():
+    game_acts = acts_post[game_idx, :, sae_idx, latent_idx]
+    plot_game(
+        flat_dataset[game_idx],
+        subplot_titles=[
+            f"<b style='color:red;'>{act:.2f}</b>" if act > 0 else ""
+            for act in game_acts.tolist()
+        ],
+    )
 
-    with t.inference_mode():
-        forward_dict = sae.forward_dataset(dataset)
+# %%
+latent_normed = latents_normed[sae_idx, 326]
+latent_probe_similarities = latent_normed @ probes_normed
+latent_probe_similarities = latent_probe_similarities.reshape(len(probe_keys), -1).T
+latent_probe_df = pd.DataFrame(
+    latent_probe_similarities.cpu().numpy(),
+    columns=probe_keys,
+    index=list(enumerate(move_id_to_text(i, size) for i in actually_all_squares)),
+)
 
-    acts_post = forward_dict["acts_post"].cpu()
-    acts_post = acts_post.reshape(-1, sae.model.cfg.n_ctx, sae.cfg.d_sae)[
-        ..., latent_idx
+
+# Highlight the top 3 absolute values in the DataFrame
+def highlight_top3(s):
+    is_top3 = s.abs().nlargest(3).index
+    return ["background-color: yellow" if i in is_top3 else "" for i in s.index]
+
+
+latent_probe_df = latent_probe_df.style.apply(highlight_top3, axis=0)
+latent_probe_df
+
+# %%
+sae_layer, is_mlp = divmod(3, 2)
+
+# %%
+# sae_layer, is_mlp = divmod(sae_idx, 2)
+for sae_layer, is_mlp in product(range(sae.model.cfg.n_layers), [0, 1]):
+    upstream_labels = [
+        *[
+            f"Q{l}H{h}D{d}"
+            for l in range(sae_layer + 1, sae.model.cfg.n_layers)
+            for h in range(sae.model.cfg.n_heads)
+            for d in range(sae.model.cfg.d_head)
+        ],
+        *[
+            f"K{l}H{h}D{d}"
+            for l in range(sae_layer + 1, sae.model.cfg.n_layers)
+            for h in range(sae.model.cfg.n_heads)
+            for d in range(sae.model.cfg.d_head)
+        ],
+        *[
+            f"V{l}H{h}D{d}"
+            for l in range(sae_layer + 1, sae.model.cfg.n_layers)
+            for h in range(sae.model.cfg.n_heads)
+            for d in range(sae.model.cfg.d_head)
+        ],
+        *[
+            f"M{l}N{n}"
+            for l in range(sae_layer + is_mlp, sae.model.cfg.n_layers)
+            for n in range(sae.model.cfg.d_mlp)
+        ],
+        *[
+            f"U_{move_id_to_text(i, size)}"
+            for i in all_squares
+        ]
     ]
-
-    # Sort acts_post and input_ids by the l0 norm in acts_post along dim -1
-    l0_per_game = (acts_post.abs() > 1e-8).sum(1)
-    l1_per_game = acts_post.abs().sum(1)
-    sorted_indices = t.argsort(l0_per_game, dim=0, descending=True)[:topk]
-    print(l0_per_game[sorted_indices], l1_per_game[sorted_indices])
-
-    acts_post = acts_post[sorted_indices]
-    dataset = datasets.concatenate_datasets(
-        [Dataset.from_dict(d) for d in dataset]
-    ).select(sorted_indices)
-
-    print(sorted_indices.shape, acts_post.shape, len(dataset))
-
-    for i, d in enumerate(dataset):
-        plot_game(d)
-        print(acts_post[i])
-
-
-# latent_idx = sorted_latent_idxs[100].item()
-latent_idx = 1336
-latent_normed = sae.W_dec_normalized[latent_idx] @ post_matrix
-latent_normed /= latent_normed.norm(dim=-1, keepdim=True)
-# latent_normed = sae.W_enc.T[latent_idx]
-cosine_similarity = (latent_normed @ probes_normed).detach().cpu()
-print(latent_normed.shape, probes_normed.shape, cosine_similarity.shape)
-
-# Create a DataFrame with the results
-cosine_similarity_df = pd.DataFrame(
-    cosine_similarity.numpy().reshape(len(colinear_keys), -1),
-    index=colinear_keys,
-    columns=[move_id_to_text(i, size) for i in actually_all_squares],
-).T
-
-print(latent_idx)
-print(cosine_similarity_df.where(cosine_similarity_df.abs() > 0.1))
-# print(cosine_similarity_df)
-print(latent_idx)
-visualise_dataset_activations(sae, latent_idx, topk=1)
-
-# %%
-w_ep = model.W_E_pos.clone()
-# w_ep /= w_ep.norm(dim=-1, keepdim=True)
-w_ep_basis = w_ep.clone()
-# Perform Gram-Schmidt process to orthogonalize the rows of w_ep
-for _ in tqdm(range(8)):
-    for i in range(w_ep.shape[0]):
-        for j in range(w_ep.shape[0]):
-            if j == i:
-                continue
-            projection = (
-                (w_ep_basis[i] @ w_ep_basis[j])
-                / (w_ep_basis[j] @ w_ep_basis[j])
-                * w_ep_basis[j]
-            )
-            w_ep_basis[i] -= projection
-
-fig = go.Figure()
-fig.add_trace(
-    go.Heatmap(
-        z=(w_ep_basis @ w_ep_basis.T > 0.1).float().cpu(),
+    upstream_weights = [
+        model.W_Q[sae_layer + 1 :],
+        model.W_K[sae_layer + 1 :],
+        model.W_V[sae_layer + 1 :],
+        model.W_in[sae_layer + is_mlp :],
+        model.W_U.unsqueeze(0),
+    ]
+    upstream_weights = t.cat(
+        [w.transpose(-2, -1).flatten(0, -2) for w in upstream_weights], dim=0
     )
-)
-fig.show()
+    upstream_weights /= upstream_weights.norm(dim=-1, keepdim=True)
 
-# %%
-diag = t.diag(w_ep_basis @ w_ep_basis.T)
-w_ep_basis[diag > 1e-6] /= diag[diag > 1e-6].sqrt().unsqueeze(-1)
-fig = go.Figure()
-fig.add_trace(
-    go.Heatmap(
-        z=(w_ep_basis @ w_ep_basis.T).detach().cpu(),
+    upstream_activations = latents_normed[sae_idx] @ upstream_weights.T
+    upstream_activations = upstream_activations.where(
+        upstream_activations.abs() > 0.5, t.nan
     )
-)
-# w_ep (63, 64)
-# basis (36, 64)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Heatmap(
+            z=upstream_activations.cpu(),
+            x=upstream_labels,
+        )
+    )
+    fig.show()
 
 # %%
-print(w_ep_basis.shape)
-l0_sae = OthelloSAE(
-    OthelloSAEConfig(
-        d_sae=w_ep_basis.shape[0],
-    ),
-    model,
-    train_dataset,
-    test_dataset,
+r = t.randn_like(latents_normed[sae_idx])
+r /= r.norm(dim=-1, keepdim=True)
+random_upstream_activations = r @ upstream_weights.T
+random_upstream_activations = random_upstream_activations.where(
+    random_upstream_activations.abs() > 0.5, t.nan
 )
 
-# %%
-l0_sae.W_enc.data = w_ep_basis
 fig = go.Figure()
 fig.add_trace(
     go.Heatmap(
-        z=(model.W_E_pos @ w_ep_basis.T).detach().cpu(),
+        z=random_upstream_activations.cpu(),
+        x=upstream_labels,
     )
 )
 fig.show()

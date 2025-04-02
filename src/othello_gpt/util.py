@@ -313,6 +313,20 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True) 
         n_embd = 64
         bias = False
         weight_tying = False
+    elif name == "awonga/othello-gpt-600k":
+        size = 6
+        n_layer = 3
+        n_head = 8
+        n_embd = 128
+        bias = False
+        weight_tying = False
+    elif name == "awonga/othello-gpt-150k":
+        size = 6
+        n_layer = 3
+        n_head = 8
+        n_embd = 64
+        bias = False
+        weight_tying = False
     else:
         raise ValueError(name)
 

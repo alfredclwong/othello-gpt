@@ -416,3 +416,323 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
             resampled_neurons * resample_scale
         )
         self.b_enc.data[dead_neurons] = 0
+
+
+@dataclass(frozen=True)
+class UpstreamSAEConfig:
+    d_in: int
+    d_sae: int
+    hook_layer: int
+    hook_suffix: str
+
+    sparsity_coeff: float = 1e-2
+    upstream_coeff: float = 1e-4
+
+    n_epochs: int = 8
+    n_steps_per_epoch: int = 14_000
+    batch_size: int = 128
+
+    log_steps: int = 1000
+    log_warmup_steps: int = 100
+
+    lr: float = 1e-3
+    lr_scale: Callable[[int, int], float] = linear_lr
+    lr_warmup_steps: int = 50
+    lr_warmup_scale: float = 0.1
+    betas: Tuple[float, float] = (0.9, 0.999)
+
+    resample_method: Literal["simple", "advanced", None] = "simple"
+    resample_freq: int = 14_000
+    resample_window: int = 2000
+    resample_scale: float = 0.5
+
+    use_wandb: bool = True
+    weight_normalize_eps: float = 1e-8
+    architecture: Literal["standard", "gated", "jumprelu"] = "standard"
+
+
+class UpstreamSAE(t.nn.Module, hf.PyTorchModelHubMixin):
+    W_enc: Float[Tensor, "d_in d_sae"]
+    W_dec: Float[Tensor, "d_sae d_in"]
+    b_enc: Float[Tensor, "d_sae"]
+    b_dec: Float[Tensor, "d_in"]
+
+    def __init__(
+        self,
+        cfg: UpstreamSAEConfig,
+        model: HookedTransformer,
+        device: str,
+    ):
+        super(UpstreamSAE, self).__init__()
+
+        self.cfg = cfg
+        self.device = device
+        self.model = model
+        self.model.requires_grad_(False)
+        self.hook_name = f"blocks.{cfg.hook_layer}.{cfg.hook_suffix}"
+
+        is_mlp = "mlp" in cfg.hook_suffix
+        self.post_matrix = t.eye(cfg.d_in) if is_mlp else model.W_O[cfg.hook_layer].flatten(0, 1)
+        upstream_weights = [
+            model.W_Q[cfg.hook_layer + 1 :],
+            model.W_K[cfg.hook_layer + 1 :],
+            model.W_V[cfg.hook_layer + 1 :],
+            model.W_in[cfg.hook_layer + is_mlp :],
+            model.W_U.unsqueeze(0),
+        ]
+        upstream_weights = t.cat(
+            [w.transpose(-2, -1).flatten(0, -2) for w in upstream_weights], dim=0
+        )
+        upstream_weights /= upstream_weights.norm(dim=-1, keepdim=True)
+        self.upstream_weights = upstream_weights
+
+        self.W_enc = t.nn.Parameter(
+            t.nn.init.kaiming_uniform_(t.empty(self.cfg.d_in, self.cfg.d_sae))
+        )
+        self.W_dec = t.nn.Parameter(
+            t.nn.init.kaiming_uniform_(t.empty(self.cfg.d_sae, self.cfg.d_in))
+        )
+        self.W_dec.data = self.W_dec_normalized
+        self.b_enc = t.nn.Parameter(t.zeros(self.cfg.d_sae))
+        self.b_dec = t.nn.Parameter(t.zeros(self.cfg.d_in))
+
+        self.to(self.device)
+
+    @property
+    def W_dec_normalized(self) -> Float[Tensor, "d_sae d_in"]:
+        return self.W_dec / (
+            self.W_dec.norm(dim=-1, keepdim=True) + self.cfg.weight_normalize_eps
+        )
+
+    def forward(
+        self, x: Float[Tensor, "batch d_in"]
+    ) -> tuple[
+        dict[str, Float[Tensor, "batch"]],
+        Float[Tensor, "batch d_sae"],
+        Float[Tensor, "batch d_in"],
+    ]:
+        x_c = x - self.b_dec
+        acts_pre = x_c @ self.W_enc + self.b_enc
+        acts_post = t.nn.functional.relu(acts_pre)
+        x_recon = acts_post @ self.W_dec_normalized + self.b_dec
+
+        l_recon = (x - x_recon).pow(2).mean(-1)
+        l_recon /= x.norm(dim=-1).mean(0, keepdim=True)
+        l_sparsity = acts_post.abs().sum(-1)
+        l_upstream = -(self.W_dec_normalized @ self.post_matrix @ self.upstream_weights.T)
+        l_upstream = l_upstream.mean(-1).sum().repeat(x.shape[0])
+        # does sum make sense? early layers have more upstream
+        l_sae = (
+            l_recon
+            + self.cfg.sparsity_coeff * l_sparsity
+            + self.cfg.upstream_coeff * l_upstream
+        )
+        l_dict = {
+            "L_recon": l_recon,
+            "L_sparsity": l_sparsity,
+            "L_upstream": l_upstream,
+            "L_sae": l_sae,
+        }
+
+        return l_dict, acts_post, x_recon
+
+    def forward_dataset(self, dataset: Dataset) -> dict[str, Tensor]:
+        """
+        Forward pass on a batched Dataset.
+        """
+        data = []
+
+        for batch in dataset:
+            with t.inference_mode():
+                # TODO batch calculate activations and sample randomly to avoid training batches with tokens from the same game
+                input_ids = t.tensor(batch["input_ids"], device=self.device)[:, :-1]
+                _, cache = self.model.run_with_cache(
+                    input_ids,
+                    names_filter=self.hook_name,
+                    stop_at_layer=self.cfg.hook_layer + 1,
+                )
+                x: Float[Tensor, "(batch pos) d_model"] = cache[self.hook_name].flatten(2).flatten(0, 1)
+
+            loss_dict, acts_post, x_recon = self.forward(x)
+            data.append(
+                {
+                    **{name: loss_term for name, loss_term in loss_dict.items()},
+                    "acts_post": acts_post,
+                    "x_recon": x_recon,
+                    "x": x,
+                }
+            )
+
+        forward_dict = {k: t.cat([d[k] for d in data], dim=0) for k in data[0]}
+        return forward_dict
+
+    def optimise(
+        self,
+        train_dataset: Dataset,
+        test_dataset: Dataset,
+    ):
+        if self.cfg.use_wandb:
+            wandb.init(project="othello-gpt-sae", config=self.cfg)
+
+        n_steps = self.cfg.n_epochs * self.cfg.n_steps_per_epoch
+        pbar = tqdm(range(n_steps))
+
+        batched_train_dataset = (
+            train_dataset.select_columns(["input_ids"])
+            .shuffle(seed=0)
+            .take(min(len(train_dataset), n_steps * self.cfg.batch_size))
+            .batch(self.cfg.batch_size)
+        )
+        batched_test_dataset = test_dataset.select_columns(["input_ids"]).batch(self.cfg.batch_size)
+
+        optimizer = t.optim.Adam(
+            list(self.parameters()), lr=self.cfg.lr, betas=self.cfg.betas
+        )
+        frac_active_in_window = deque(maxlen=self.cfg.resample_window)
+
+        for step in pbar:
+            # Update learning rate
+            step_lr = self.cfg.lr * self.cfg.lr_scale(step, n_steps)
+            if step % self.cfg.resample_freq < self.cfg.lr_warmup_steps:
+                step_lr *= self.cfg.lr_warmup_scale
+            for group in optimizer.param_groups:
+                group["lr"] = step_lr
+
+            # Optimize
+            batch_dataset = batched_train_dataset.select([step % len(batched_train_dataset)])
+            forward_dict = self.forward_dataset(batch_dataset)
+            forward_dict["L_sae"].mean(0).sum().backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+            # Normalize decoder weights by modifying them directly
+            self.W_dec.data = self.W_dec_normalized.data
+
+            # Calculate the mean sparsities over batch dim for each feature
+            active = forward_dict["acts_post"] > 1e-8
+            frac_active = active.float().mean(0)
+            frac_active_in_window.append(frac_active)
+
+            # Resample dead latents
+            resample = (
+                (self.cfg.resample_method is not None)
+                and ((step + 1) % self.cfg.resample_freq == 0)
+                and (step + 1 + self.cfg.resample_freq < n_steps)
+            )
+            if resample:
+                if self.cfg.resample_method == "simple":
+                    self.resample_simple(
+                        t.stack(list(frac_active_in_window), dim=0),
+                        self.cfg.resample_scale,
+                    )
+                elif self.cfg.resample_method == "advanced":
+                    raise NotImplementedError
+
+            # Display progress bar, and log a bunch of values for creating plots / animations
+            if not (step % self.cfg.resample_freq < self.cfg.log_warmup_steps) and (
+                step % self.cfg.log_steps == 0 or (step + 1 == n_steps)
+            ):
+                eval_dict = self.evaluate(batched_test_dataset)
+                pbar.set_postfix(
+                    {
+                        "step": step,
+                        "lr": step_lr,
+                        **eval_dict,
+                    }
+                )
+                if self.cfg.use_wandb:
+                    wandb.log(
+                        {
+                            "lr": step_lr,
+                            **eval_dict,
+                        }, step=step,
+                    )
+
+        if self.cfg.use_wandb:
+            wandb.finish()
+
+    def evaluate(self, batched_dataset: Dataset):
+        eval_dict = {}
+
+        with t.inference_mode():
+            forward_dict = self.forward_dataset(batched_dataset)
+
+        dead_latent_count = (forward_dict["acts_post"] < 1e-8).all(0).sum(-1)
+        frac_active = (forward_dict["acts_post"] >= 1e-8).float().mean(0).mean(-1)
+        input_ids = t.cat(
+            [
+                t.tensor(d["input_ids"], device=self.device)[:, :-1]
+                for d in batched_dataset
+            ],
+            dim=0,
+        )
+
+        def zero_ablation_hook(x, hook: HookPoint):
+            return t.zeros_like(x)
+
+        def sae_hook(x, hook: HookPoint):
+            return forward_dict["x_recon"].reshape_as(x)
+
+        loss_dict = {
+            k: v.mean().item()
+            for k, v in forward_dict.items()
+            if k.startswith("L_")
+        }
+        eval_dict.update(loss_dict)
+        eval_dict["n_dead"] = dead_latent_count.item()
+        eval_dict["frac_active"] = frac_active.item()
+
+        with t.inference_mode():
+            self.model.reset_hooks()
+            loss_recon = self.model.run_with_hooks(
+                input_ids,
+                return_type="loss",
+                fwd_hooks=[(self.hook_name, lambda x, hook: sae_hook(x, hook))],
+            )
+
+            self.model.reset_hooks()
+            loss_zero = self.model.run_with_hooks(
+                input_ids,
+                return_type="loss",
+                fwd_hooks=[(self.hook_name, zero_ablation_hook)],
+            )
+
+            self.model.reset_hooks()
+            loss_original = self.model(input_ids, return_type="loss")
+
+        loss_recovered_zero = (
+            (1 - (loss_recon - loss_original) / (loss_zero - loss_original))
+            .mean()
+            .item()
+        )
+        eval_dict["loss_recovered"] = loss_recovered_zero
+
+        return eval_dict
+
+    @t.no_grad()
+    def resample_simple(
+        self,
+        frac_active_in_window: Float[Tensor, "window d_sae"],
+        resample_scale: float,
+    ) -> None:
+        """
+        Resamples dead latents, by modifying the model's weights and biases inplace.
+
+        Resampling method is:
+            - For each dead neuron, generate a random vector of size (d_in,), and normalize these vectors
+            - Set new values of W_dec and W_enc to be these normalized vectors, at each dead neuron
+            - Set b_enc to be zero, at each dead neuron
+        """
+        dead_neurons = (frac_active_in_window < 1e-8).all(0)
+        print(
+            f"Resampling {dead_neurons.sum().item()}/{dead_neurons.numel()} dead neurons..."
+        )
+        resampled_neurons = t.randn(
+            dead_neurons.sum(), self.cfg.d_in, device=self.W_dec.device
+        )
+        resampled_neurons /= (
+            resampled_neurons.norm(dim=-1, keepdim=True) + self.cfg.weight_normalize_eps
+        )
+        self.W_dec.data[dead_neurons] = resampled_neurons
+        self.W_enc.data.T[dead_neurons] = resampled_neurons * resample_scale
+        self.b_enc.data[dead_neurons] = 0
