@@ -419,14 +419,14 @@ class OthelloSAE(t.nn.Module, hf.PyTorchModelHubMixin):
 
 
 @dataclass(frozen=True)
-class UpstreamSAEConfig:
+class DownstreamSAEConfig:
     d_in: int
     d_sae: int
     hook_layer: int
     hook_suffix: str
 
     sparsity_coeff: float = 1e-2
-    upstream_coeff: float = 1e-4
+    downstream_coeff: float = 1e-4
 
     n_epochs: int = 8
     n_steps_per_epoch: int = 14_000
@@ -436,7 +436,7 @@ class UpstreamSAEConfig:
     log_warmup_steps: int = 100
 
     lr: float = 1e-3
-    lr_scale: Callable[[int, int], float] = linear_lr
+    lr_scale: Callable[[int, int], float] = constant_lr
     lr_warmup_steps: int = 50
     lr_warmup_scale: float = 0.1
     betas: Tuple[float, float] = (0.9, 0.999)
@@ -451,7 +451,7 @@ class UpstreamSAEConfig:
     architecture: Literal["standard", "gated", "jumprelu"] = "standard"
 
 
-class UpstreamSAE(t.nn.Module, hf.PyTorchModelHubMixin):
+class DownstreamSAE(t.nn.Module, hf.PyTorchModelHubMixin):
     W_enc: Float[Tensor, "d_in d_sae"]
     W_dec: Float[Tensor, "d_sae d_in"]
     b_enc: Float[Tensor, "d_sae"]
@@ -459,11 +459,11 @@ class UpstreamSAE(t.nn.Module, hf.PyTorchModelHubMixin):
 
     def __init__(
         self,
-        cfg: UpstreamSAEConfig,
+        cfg: DownstreamSAEConfig,
         model: HookedTransformer,
         device: str,
     ):
-        super(UpstreamSAE, self).__init__()
+        super(DownstreamSAE, self).__init__()
 
         self.cfg = cfg
         self.device = device
@@ -472,19 +472,19 @@ class UpstreamSAE(t.nn.Module, hf.PyTorchModelHubMixin):
         self.hook_name = f"blocks.{cfg.hook_layer}.{cfg.hook_suffix}"
 
         is_mlp = "mlp" in cfg.hook_suffix
-        self.post_matrix = t.eye(cfg.d_in) if is_mlp else model.W_O[cfg.hook_layer].flatten(0, 1)
-        upstream_weights = [
+        self.post_matrix = t.eye(cfg.d_in, device=device) if is_mlp else model.W_O[cfg.hook_layer].flatten(0, 1)
+        downstream_weights = [
             model.W_Q[cfg.hook_layer + 1 :],
             model.W_K[cfg.hook_layer + 1 :],
             model.W_V[cfg.hook_layer + 1 :],
             model.W_in[cfg.hook_layer + is_mlp :],
             model.W_U.unsqueeze(0),
         ]
-        upstream_weights = t.cat(
-            [w.transpose(-2, -1).flatten(0, -2) for w in upstream_weights], dim=0
+        downstream_weights = t.cat(
+            [w.transpose(-2, -1).flatten(0, -2) for w in downstream_weights], dim=0
         )
-        upstream_weights /= upstream_weights.norm(dim=-1, keepdim=True)
-        self.upstream_weights = upstream_weights
+        downstream_weights /= downstream_weights.norm(dim=-1, keepdim=True)
+        self.downstream_weights = downstream_weights
 
         self.W_enc = t.nn.Parameter(
             t.nn.init.kaiming_uniform_(t.empty(self.cfg.d_in, self.cfg.d_sae))
@@ -517,20 +517,18 @@ class UpstreamSAE(t.nn.Module, hf.PyTorchModelHubMixin):
         x_recon = acts_post @ self.W_dec_normalized + self.b_dec
 
         l_recon = (x - x_recon).pow(2).mean(-1)
-        l_recon /= x.norm(dim=-1).mean(0, keepdim=True)
+        # l_recon /= x.norm(dim=-1).mean(0, keepdim=True)
         l_sparsity = acts_post.abs().sum(-1)
-        l_upstream = -(self.W_dec_normalized @ self.post_matrix @ self.upstream_weights.T)
-        l_upstream = l_upstream.mean(-1).sum().repeat(x.shape[0])
-        # does sum make sense? early layers have more upstream
+        l_downstream = -(x_recon @ self.post_matrix @ self.downstream_weights.T).abs().mean(-1)
         l_sae = (
             l_recon
             + self.cfg.sparsity_coeff * l_sparsity
-            + self.cfg.upstream_coeff * l_upstream
+            + self.cfg.downstream_coeff * l_downstream
         )
         l_dict = {
             "L_recon": l_recon,
             "L_sparsity": l_sparsity,
-            "L_upstream": l_upstream,
+            "L_downstream": l_downstream,
             "L_sae": l_sae,
         }
 
@@ -652,6 +650,9 @@ class UpstreamSAE(t.nn.Module, hf.PyTorchModelHubMixin):
             wandb.finish()
 
     def evaluate(self, batched_dataset: Dataset):
+        # TODO mean abalation
+        # TODO KL div
+
         eval_dict = {}
 
         with t.inference_mode():

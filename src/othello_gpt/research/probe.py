@@ -80,7 +80,7 @@ device = t.device(
 
 # %%
 # version = "1.5M"
-version = "300k"
+version = "600k"
 model = load_model(device, f"awonga/othello-gpt-{version}")
 model
 

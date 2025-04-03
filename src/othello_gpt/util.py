@@ -151,6 +151,16 @@ def load_probes(
             (None, "l"): "probe_300k_legal_20250327_185836.pt",
             (None, "pee"): "probe_300k_pee_20250327_202103.pt",
         }
+    elif model_version == "600k":
+        probe_names = {
+            "met": "probe_600k_tem_20250403_093356.pt",
+            (None, "c"): "probe_600k_cap_20250403_094805.pt",
+            (None, "mov"): "probe_600k_mov_20250403_095853.pt",
+            (None, "pos"): "probe_600k_pos_20250403_100402.pt",
+            (None, "ee"): "probe_600k_ee_20250403_100726.pt",
+            (None, "l"): "probe_600k_legal_20250403_092223.pt",
+            (None, "pee"): "probe_600k_pee_20250403_102232.pt",
+        }
     else:
         raise ValueError(f"{model_version=} not recognised when loading probes...")
 

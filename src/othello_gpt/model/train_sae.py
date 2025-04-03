@@ -7,7 +7,7 @@ import wandb
 from datasets import load_dataset
 
 from othello_gpt.util import load_model
-from othello_gpt.model.sae import OthelloSAE, OthelloSAEConfig, UpstreamSAE, UpstreamSAEConfig
+from othello_gpt.model.sae import DownstreamSAE, DownstreamSAEConfig
 
 # %%
 device = t.device(
@@ -23,7 +23,7 @@ root_dir = Path().cwd().parent.parent.parent
 hf.login((root_dir / "secret.txt").read_text())
 wandb.login()
 
-model_version = "300k"
+model_version = "600k"
 model_name = f"awonga/othello-gpt-{model_version}"
 model = load_model(device, model_name)
 
@@ -32,46 +32,27 @@ train_dataset = dataset_dict["train"]
 test_dataset = dataset_dict["test"]
 
 # %%
-# sae_cfg = OthelloSAEConfig(
-#     d_in=model.cfg.d_model,
-#     d_sae=2048,
-#     hook_layers=list(range(model.cfg.n_layers)),
-#     hook_suffixes=["attn.hook_z", "hook_mlp_out"],
-#     use_wandb=True,
-#     n_epochs=8,
-#     n_train=14000*128,
-#     batch_size=128,
-#     resample_freq=14000,
-#     resample_window=2000,
-#     log_steps=1000,
-#     sparsity_coeff=0.1,
-# )
-# print(sae_cfg)
-# sae = OthelloSAE(sae_cfg, model, train_dataset, test_dataset, device)
-# data_log = sae.optimize()
-# sae.push_to_hub(f"{model_name}-sae")
-
-# %%
-sae_cfg = UpstreamSAEConfig(
-    d_in=model.cfg.d_model,
-    d_sae=1024,
-    hook_layer=0,
-    hook_suffix="attn.hook_z",
-    use_wandb=False,
-    n_epochs=2,
-    n_steps_per_epoch=8000,
-    batch_size=128,
-    resample_freq=4000,
-    resample_window=4000,
-    log_steps=1000,
-    log_warmup_steps=10,
-    sparsity_coeff=2e-3,
-    lr=1e-3,
-    upstream_coeff=1e-6,
-    # upstream_coeff=0,
-)
-print(sae_cfg)
-sae = UpstreamSAE(sae_cfg, model, device)
-sae.optimise(train_dataset, test_dataset.take(1024))
+for hook_layer in range(model.cfg.n_layers)[::-1]:
+    for hook_suffix in ["attn.hook_z", "hook_mlp_out"][::-1]:
+        is_mlp = "mlp" in hook_suffix
+        sparsity_coeff = 0.05 * pow(2, hook_layer) / (1 if is_mlp else 20)
+        # downstream_coeff = sparsity_coeff
+        downstream_coeff = 0
+        sae_cfg = DownstreamSAEConfig(
+            d_in=model.cfg.d_model,
+            d_sae=1024,
+            hook_layer=hook_layer,
+            hook_suffix=hook_suffix,
+            lr=1e-3,
+            sparsity_coeff=sparsity_coeff,
+            downstream_coeff=downstream_coeff,
+            n_epochs=2,
+            resample_freq=9000,
+            resample_window=2000,
+        )
+        print(sae_cfg)
+        sae = DownstreamSAE(sae_cfg, model, device)
+        sae.optimise(train_dataset, test_dataset.take(1024))
+        sae.push_to_hub(f"{model_name}-sae-{sae.hook_name}")
 
 # %%

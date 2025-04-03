@@ -3,19 +3,17 @@ from pathlib import Path
 
 import torch as t
 from datasets import Dataset, load_dataset
-from tqdm import tqdm
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from jaxtyping import Float
 from torch.types import Tensor
+import einops
 
 from othello_gpt.data.vis import move_id_to_text, plot_game
 from othello_gpt.util import load_model, load_probes, get_all_squares
-from othello_gpt.model.sae import OthelloSAE, OthelloSAEConfig
+from othello_gpt.model.sae import DownstreamSAE, DownstreamSAEConfig
 import datasets
-from itertools import product
-import numpy as np
 
 # %%
 device = t.device(
@@ -26,11 +24,11 @@ device = t.device(
     else "cpu"
 )
 
-root_dir = Path().cwd().parent.parent.parent
+root_dir = Path().cwd()#.parent.parent.parent
 data_dir = root_dir / "data"
 probe_dir = data_dir / "probes"
 
-model_version = "300k"
+model_version = "600k"
 model_name = f"awonga/othello-gpt-{model_version}"
 model = load_model(device, model_name)
 
@@ -50,6 +48,36 @@ edges = [
     if x * y == 0 or x == size - 1 or y == size - 1
 ]
 non_edges = [i for i in range(size * size) if i not in edges]
+
+# %%
+cfg = DownstreamSAEConfig(
+    d_in=model.cfg.d_model,
+    d_sae=1024,
+    hook_layer=2,
+    # hook_suffix="hook_mlp_out",
+    hook_suffix="attn.hook_z",
+)
+is_z = "hook_z" in cfg.hook_suffix
+hook_name = f"blocks.{cfg.hook_layer}.{cfg.hook_suffix}"
+sae =DownstreamSAE.from_pretrained(
+    f"{model_name}-sae-{hook_name}",
+    cfg=cfg,
+    model=model,
+    device=device,
+)
+
+batched_test_dataset = test_dataset.take(1024).batch(128)
+eval_dict = sae.evaluate(batched_test_dataset)
+with t.inference_mode():
+    test_forward_dict = sae.forward_dataset(batched_test_dataset)
+
+acts_post = test_forward_dict["acts_post"].reshape(
+    -1, sae.model.cfg.n_ctx, sae.cfg.d_sae
+)
+frac_active = (acts_post > 1e-8).float().flatten(0, 1).mean(0)
+sorted_latent_idxs = t.argsort(frac_active, dim=-1, descending=True)
+
+{k: eval_dict[k] for k in sorted(eval_dict.keys())}
 
 # %%
 padded_W_pos = t.full((size * size, model.W_pos.shape[1]), t.nan, device=device)
@@ -72,7 +100,7 @@ probes["pos"] = t.nn.functional.pad(
 
 probe_keys = ["ee", "+t-m", "c", "mov", "b", "u", "p", "l", "pos"]
 probes_normed: Float[Tensor, "d_model n_probe"] = t.cat(
-    [probes[k][..., 3] for k in probe_keys], dim=1
+    [probes[k][..., sae.cfg.hook_layer] for k in probe_keys], dim=1
 )
 probe_suffixes = {
     k: [
@@ -86,109 +114,54 @@ probe_bases_labels = [f"{k}_{s}" for k in probe_keys for s in probe_suffixes[k]]
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
 
 # %%
-sae_cfg = OthelloSAEConfig(
-    d_in=model.cfg.d_model,
-    d_sae=1024,
-    hook_layers=list(range(model.cfg.n_layers)),
-    hook_suffixes=["attn.hook_z", "hook_mlp_out"],
-)
-sae = OthelloSAE.from_pretrained(
-    f"{model_name}-sae",
-    sae_cfg=sae_cfg,
-    model=model,
-    train_dataset=train_dataset,
-    test_dataset=test_dataset,
-    device=device,
-)
-eval_dict = sae.evaluate()
-dataset = sae.test_dataset
-with t.inference_mode():
-    test_forward_dict = sae.forward_dataset(dataset)
+x = test_forward_dict["x"]
+x_recon = test_forward_dict["x_recon"]
+err = x - x_recon
+[v.norm(dim=-1).mean().item() for v in [x, x_recon, err]], test_forward_dict["acts_post"].norm(0, dim=-1).mean()
 
 # %%
-# Result visualisation
-# 1. Loss recovered
-# 2. x norms, error norms
-# 3. Latent activity
-# 4. Self colinearity, linear probe colinearity
-# 5. Max activating datasets
-
-# %%
-# Analysis
-# 1. Binary feature pairs
-# 2. Feature geometry
-# 3. Feature circuits
-# 4.
-
-# %%
-{k: eval_dict[k] for k in sorted(eval_dict.keys())}
-
-# %%
-x_norms = dict(
-    zip(sae.hook_names, test_forward_dict["x"].norm(dim=-1).mean(0).tolist())
-)
-x_recon_norms = dict(
-    zip(sae.hook_names, test_forward_dict["x_recon"].norm(dim=-1).mean(0).tolist())
-)
-# L5 mlp out is massive! hypothesis: empty and legal are same direction, but legal gets
-# evidence-boosted to a much higher magnitude for softmax
-# so should we have magnitude-range based features? don't think this is necessary - we
-# can have both empty and legal being co-active above threshold, this actually prevents splitting
-x_norms, x_recon_norms
-
-# %%
-acts_post = test_forward_dict["acts_post"].reshape(
-    -1, sae.model.cfg.n_ctx, sae.n_sae, sae.cfg.d_sae
-)
-frac_active = (acts_post > 1e-8).float().flatten(0, 1).mean(0)
-sorted_latent_idxs = t.argsort(frac_active, dim=-1, descending=True)
-
 fig = make_subplots(
-    rows=sae.n_sae,
-    cols=2,
+    rows=2,
+    cols=1,
     shared_xaxes=True,
-    subplot_titles=[
-        f"{h} {t}" for h, t in product(sae.hook_names, ["acts", "frac_active"])
-    ],
+    subplot_titles=["Activation heatmap", "Frac active"],
 )
-for i, hook_name in enumerate(sae.hook_names):
-    fig.add_trace(
-        go.Heatmap(
-            z=acts_post[:10, :, i, sorted_latent_idxs[i]].flatten(0, 1).cpu(),
-            showscale=False,
-        ),
-        row=i + 1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(y=frac_active[i, sorted_latent_idxs[i]].cpu(), showlegend=False),
-        row=i + 1,
-        col=2,
-    )
-fig.update_layout(
-    height=200 * sae.n_sae,
+fig.add_trace(
+    go.Heatmap(
+        z=acts_post[:10, :, sorted_latent_idxs].flatten(0, 1).cpu(),
+        showscale=False,
+    ),
+    row=1,
+    col=1,
+)
+fig.add_trace(
+    go.Scatter(y=frac_active[sorted_latent_idxs].cpu(), showlegend=False),
+    row=2,
+    col=1,
 )
 fig.show()
 
 # %%
-latents_normed: Float[Tensor, "n_sae d_sae d_in"] = (
-    sae.W_dec_normalized.detach().clone()
-)
-for i, hook_name in enumerate(sae.hook_names):
-    latents_normed[i] = latents_normed[i, sorted_latent_idxs[i]]
-    if "hook_z" in hook_name:
-        hook_layer = int(hook_name[len("blocks.")][0])
-        latents_normed[i] @= sae.model.W_O[hook_layer].flatten(0, 1)
+latents_normed: Float[Tensor, "d_sae d_in"] = sae.W_dec_normalized.detach().clone()
 latents_normed /= latents_normed.norm(dim=-1, keepdim=True)
-flat_latents_normed = latents_normed.flatten(0, 1)
+latents_normed = latents_normed[sorted_latent_idxs]
+if is_z:
+    latents_normed = latents_normed.reshape(sae.cfg.d_sae, sae.model.cfg.n_heads, sae.model.cfg.d_head)
+    w_o_normed = sae.model.W_O[sae.cfg.hook_layer]
+    w_o_normed /= w_o_normed.norm(dim=-1, keepdim=True)
+    latents_normed = einops.einsum(
+        latents_normed,
+        w_o_normed,
+        "d_sae n_head d_head, n_head d_head d_model -> d_sae n_head d_model"
+    ).flatten(0, 1)
 
-self_colinearity_matrix = flat_latents_normed @ flat_latents_normed.T
+self_colinearity_matrix = latents_normed @ latents_normed.T
 self_colinearity_matrix = t.tril(self_colinearity_matrix, diagonal=-1)
 colinearity_matrix = latents_normed @ probes_normed
 flat_colinearity_matrix = colinearity_matrix.flatten(0, 1)
 
 # Generate random vectors for comparison
-random_vectors = t.randn_like(flat_latents_normed)
+random_vectors = t.randn_like(latents_normed)
 random_vectors /= random_vectors.norm(dim=-1, keepdim=True)
 random_colinearity_matrix = (random_vectors @ random_vectors.T).abs()
 random_colinearity_matrix = t.tril(random_colinearity_matrix, diagonal=-1)
@@ -199,87 +172,47 @@ max_values = flat_colinearity_matrix.max(0)[0].cpu().numpy()
 random_max_values = random_colinearity_matrix.max(0)[0].cpu().numpy()
 
 # %%
-# # Create a DataFrame for the histogram
-# self_df = pd.DataFrame({"Maximum Colinearity": self_max_values})
-# df = pd.DataFrame({"Maximum Colinearity": max_values})
-# random_df = pd.DataFrame({"Maximum Colinearity": random_max_values})
-
-# random_fig = px.histogram(
-#     random_df,
-#     x="Maximum Colinearity",
-#     nbins=50,
-#     title="Histogram of Maximum Random Colinearity Values",
-#     labels={"Maximum Colinearity": "Maximum Colinearity"},
-# )
-# random_fig.update_layout(
-#     xaxis_title="Maximum Colinearity",
-#     yaxis_title="Frequency",
-#     bargap=0.1,
-# )
-# random_fig.show()
-
-# fig = px.histogram(
-#     df,
-#     x="Maximum Colinearity",
-#     nbins=50,
-#     title="Histogram of Maximum Colinearity Values",
-#     labels={"Maximum Colinearity": "Maximum Colinearity"},
-# )
-# fig.update_layout(
-#     xaxis_title="Maximum Colinearity",
-#     yaxis_title="Frequency",
-#     bargap=0.1,
-# )
-# fig.show()
-
-# fig = px.histogram(
-#     self_df,
-#     x="Maximum Colinearity",
-#     nbins=50,
-#     title="Histogram of Maximum Self-Colinearity Values",
-#     labels={"Maximum Colinearity": "Maximum Colinearity"},
-# )
-# fig.update_layout(
-#     xaxis_title="Maximum Colinearity",
-#     yaxis_title="Frequency",
-#     bargap=0.1,
-# )
-# fig.show()
-
-# fig = go.Figure()
-# fig.add_trace(
-#     go.Heatmap(
-#         z=flat_colinearity_matrix.cpu(),
-#         x=probe_bases_labels,
-#         # y=sorted_latent_idxs.tolist(),
-#     )
-# )
-# fig.update_layout(title="Latent alignment with linear probes")
-# fig.show()
-
-# %%
-top_k = 3
+top_k = 50
 abs_colinearity = colinearity_matrix.abs().nan_to_num(0)
-for i, hook_name in enumerate(sae.hook_names):
-    _, top_indices = t.topk(abs_colinearity[i].flatten(), k=top_k)
-    for k, idx in enumerate(top_indices):
-        colinearity = colinearity_matrix[i].flatten()[idx].item()
-        latent_idx, probe_idx = divmod(idx.item(), colinearity_matrix.shape[-1])
-        pct_active = frac_active[i, sorted_latent_idxs[i, latent_idx]]
-        print(
-            f"{hook_name} #{k}: {colinearity=:.2f}, {latent_idx=}, {probe_bases_labels[probe_idx]}, {pct_active=:.2%}"
-        )
+_, top_indices = t.topk(abs_colinearity.flatten(), k=top_k)
+for k, idx in enumerate(top_indices):
+    colinearity = colinearity_matrix.flatten()[idx].item()
+    latent_idx, probe_idx = divmod(idx.item(), colinearity_matrix.shape[-1])
+    lh_idx = divmod(latent_idx, sae.model.cfg.n_heads) if is_z else (latent_idx, None)
+    pct_active = frac_active[sorted_latent_idxs[lh_idx[0]]]
+    print(
+        f"{hook_name} #{k}: {colinearity=:.2f}, {lh_idx=}, {probe_bases_labels[probe_idx]}, {pct_active=:.2%}"
+    )
 
 # %%
 # Given (sae_idx, latent_idx), find the max activating datasets and plot the games with activation values
 top_k = 3
-sae_idx = 1
-latent_idx = sorted_latent_idxs[sae_idx, 326]
-max_act_per_game = acts_post[..., sae_idx, latent_idx].max(dim=1)[0]
+sorted_latent_idx = 800
+
+for h in range(sae.model.cfg.n_heads):
+    latent_normed = latents_normed[h + sorted_latent_idx * sae.model.cfg.n_heads]
+    latent_probe_similarities = latent_normed @ probes_normed
+    latent_probe_similarities = latent_probe_similarities.reshape(len(probe_keys), -1).T
+    latent_probe_df = pd.DataFrame(
+        latent_probe_similarities.cpu().numpy(),
+        columns=probe_keys,
+        index=list(enumerate(move_id_to_text(i, size) for i in actually_all_squares)),
+    )
+
+    # Highlight the top 3 absolute values in the DataFrame
+    def highlight_top3(s):
+        is_top3 = s.abs().nlargest(3).index
+        return ["background-color: yellow" if i in is_top3 else "" for i in s.index]
+
+    latent_probe_df = latent_probe_df.style.apply(highlight_top3, axis=0)
+    display(latent_probe_df)
+
+latent_idx = sorted_latent_idxs[sorted_latent_idx]
+max_act_per_game = acts_post[..., latent_idx].max(dim=1)[0]
 _, top_game_idxs = t.topk(max_act_per_game, k=top_k)
-flat_dataset = datasets.concatenate_datasets([Dataset.from_dict(d) for d in dataset])
+flat_dataset = datasets.concatenate_datasets([Dataset.from_dict(d) for d in batched_test_dataset])
 for game_idx in top_game_idxs.tolist():
-    game_acts = acts_post[game_idx, :, sae_idx, latent_idx]
+    game_acts = acts_post[game_idx, :, latent_idx]
     plot_game(
         flat_dataset[game_idx],
         subplot_titles=[
@@ -289,99 +222,9 @@ for game_idx in top_game_idxs.tolist():
     )
 
 # %%
-latent_normed = latents_normed[sae_idx, 326]
-latent_probe_similarities = latent_normed @ probes_normed
-latent_probe_similarities = latent_probe_similarities.reshape(len(probe_keys), -1).T
-latent_probe_df = pd.DataFrame(
-    latent_probe_similarities.cpu().numpy(),
-    columns=probe_keys,
-    index=list(enumerate(move_id_to_text(i, size) for i in actually_all_squares)),
-)
-
-
-# Highlight the top 3 absolute values in the DataFrame
-def highlight_top3(s):
-    is_top3 = s.abs().nlargest(3).index
-    return ["background-color: yellow" if i in is_top3 else "" for i in s.index]
-
-
-latent_probe_df = latent_probe_df.style.apply(highlight_top3, axis=0)
-latent_probe_df
-
-# %%
-sae_layer, is_mlp = divmod(3, 2)
-
-# %%
-# sae_layer, is_mlp = divmod(sae_idx, 2)
-for sae_layer, is_mlp in product(range(sae.model.cfg.n_layers), [0, 1]):
-    upstream_labels = [
-        *[
-            f"Q{l}H{h}D{d}"
-            for l in range(sae_layer + 1, sae.model.cfg.n_layers)
-            for h in range(sae.model.cfg.n_heads)
-            for d in range(sae.model.cfg.d_head)
-        ],
-        *[
-            f"K{l}H{h}D{d}"
-            for l in range(sae_layer + 1, sae.model.cfg.n_layers)
-            for h in range(sae.model.cfg.n_heads)
-            for d in range(sae.model.cfg.d_head)
-        ],
-        *[
-            f"V{l}H{h}D{d}"
-            for l in range(sae_layer + 1, sae.model.cfg.n_layers)
-            for h in range(sae.model.cfg.n_heads)
-            for d in range(sae.model.cfg.d_head)
-        ],
-        *[
-            f"M{l}N{n}"
-            for l in range(sae_layer + is_mlp, sae.model.cfg.n_layers)
-            for n in range(sae.model.cfg.d_mlp)
-        ],
-        *[
-            f"U_{move_id_to_text(i, size)}"
-            for i in all_squares
-        ]
-    ]
-    upstream_weights = [
-        model.W_Q[sae_layer + 1 :],
-        model.W_K[sae_layer + 1 :],
-        model.W_V[sae_layer + 1 :],
-        model.W_in[sae_layer + is_mlp :],
-        model.W_U.unsqueeze(0),
-    ]
-    upstream_weights = t.cat(
-        [w.transpose(-2, -1).flatten(0, -2) for w in upstream_weights], dim=0
-    )
-    upstream_weights /= upstream_weights.norm(dim=-1, keepdim=True)
-
-    upstream_activations = latents_normed[sae_idx] @ upstream_weights.T
-    upstream_activations = upstream_activations.where(
-        upstream_activations.abs() > 0.5, t.nan
-    )
-
-    fig = go.Figure()
-    fig.add_trace(
-        go.Heatmap(
-            z=upstream_activations.cpu(),
-            x=upstream_labels,
-        )
-    )
-    fig.show()
-
-# %%
-r = t.randn_like(latents_normed[sae_idx])
-r /= r.norm(dim=-1, keepdim=True)
-random_upstream_activations = r @ upstream_weights.T
-random_upstream_activations = random_upstream_activations.where(
-    random_upstream_activations.abs() > 0.5, t.nan
-)
-
-fig = go.Figure()
-fig.add_trace(
-    go.Heatmap(
-        z=random_upstream_activations.cpu(),
-        x=upstream_labels,
-    )
-)
-fig.show()
+# DFA: Direct Feature Attribution
+# Each z can be split into n_head parts
+# Showed above that each part can be out projected and probed. A good (sparse) feature
+# will only show alignment from one head to the linear probe basis.
+# DFA uses the cached A and V values to decompose z into source token contributions
+latents_normed.shape
