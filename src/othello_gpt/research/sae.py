@@ -12,7 +12,7 @@ import einops
 
 from othello_gpt.data.vis import move_id_to_text, plot_game
 from othello_gpt.util import load_model, load_probes, get_all_squares
-from othello_gpt.model.sae import DownstreamSAE, DownstreamSAEConfig
+from othello_gpt.model.sae import SAE, SAEConfig
 import datasets
 
 # %%
@@ -50,27 +50,36 @@ edges = [
 non_edges = [i for i in range(size * size) if i not in edges]
 
 # %%
-cfg = DownstreamSAEConfig(
+cfg = SAEConfig(
     d_in=model.cfg.d_model,
     d_sae=1024,
-    hook_layer=2,
-    # hook_suffix="hook_mlp_out",
-    hook_suffix="attn.hook_z",
+    in_hook_layer=2,
+    out_hook_layer=2,
+    # in_hook_suffix="attn.hook_z",
+    # out_hook_suffix="attn.hook_z",
+    in_hook_suffix="ln2.hook_normalized",
+    out_hook_suffix="hook_mlp_out",
 )
-is_z = "hook_z" in cfg.hook_suffix
-hook_name = f"blocks.{cfg.hook_layer}.{cfg.hook_suffix}"
-sae =DownstreamSAE.from_pretrained(
-    f"{model_name}-sae-{hook_name}",
+is_z = "hook_z" in cfg.out_hook_suffix
+in_hook_name = f"blocks.{cfg.in_hook_layer}.{cfg.in_hook_suffix}"
+out_hook_name = f"blocks.{cfg.out_hook_layer}.{cfg.out_hook_suffix}"
+sae_name = f"{model_name}-sae-{in_hook_name}"
+if in_hook_name != out_hook_name:
+    sae_name += f"-{out_hook_name}"
+sae =SAE.from_pretrained(
+    sae_name,
     cfg=cfg,
     model=model,
     device=device,
 )
 
 batched_test_dataset = test_dataset.take(1024).batch(128)
-eval_dict = sae.evaluate(batched_test_dataset)
 with t.inference_mode():
-    test_forward_dict = sae.forward_dataset(batched_test_dataset)
+    eval_dict, test_forward_dict = sae.evaluate(batched_test_dataset)
 
+acts_pre = test_forward_dict["acts_pre"].reshape(
+    -1, sae.model.cfg.n_ctx, sae.cfg.d_sae
+)
 acts_post = test_forward_dict["acts_post"].reshape(
     -1, sae.model.cfg.n_ctx, sae.cfg.d_sae
 )
@@ -100,7 +109,7 @@ probes["pos"] = t.nn.functional.pad(
 
 probe_keys = ["ee", "+t-m", "c", "mov", "b", "u", "p", "l", "pos"]
 probes_normed: Float[Tensor, "d_model n_probe"] = t.cat(
-    [probes[k][..., sae.cfg.hook_layer] for k in probe_keys], dim=1
+    [probes[k][..., sae.cfg.out_hook_layer] for k in probe_keys], dim=1
 )
 probe_suffixes = {
     k: [
@@ -114,7 +123,7 @@ probe_bases_labels = [f"{k}_{s}" for k in probe_keys for s in probe_suffixes[k]]
 {k: p.shape for k, p in probes.items()}  # d_model (row col) n_probe_layer
 
 # %%
-x = test_forward_dict["x"]
+x = test_forward_dict["x_out"]
 x_recon = test_forward_dict["x_recon"]
 err = x - x_recon
 [v.norm(dim=-1).mean().item() for v in [x, x_recon, err]], test_forward_dict["acts_post"].norm(0, dim=-1).mean()
@@ -147,7 +156,7 @@ latents_normed /= latents_normed.norm(dim=-1, keepdim=True)
 latents_normed = latents_normed[sorted_latent_idxs]
 if is_z:
     latents_normed = latents_normed.reshape(sae.cfg.d_sae, sae.model.cfg.n_heads, sae.model.cfg.d_head)
-    w_o_normed = sae.model.W_O[sae.cfg.hook_layer]
+    w_o_normed = sae.model.W_O[sae.cfg.out_hook_layer]
     w_o_normed /= w_o_normed.norm(dim=-1, keepdim=True)
     latents_normed = einops.einsum(
         latents_normed,
@@ -172,7 +181,7 @@ max_values = flat_colinearity_matrix.max(0)[0].cpu().numpy()
 random_max_values = random_colinearity_matrix.max(0)[0].cpu().numpy()
 
 # %%
-top_k = 50
+top_k = sae.cfg.d_sae
 abs_colinearity = colinearity_matrix.abs().nan_to_num(0)
 _, top_indices = t.topk(abs_colinearity.flatten(), k=top_k)
 for k, idx in enumerate(top_indices):
@@ -181,16 +190,17 @@ for k, idx in enumerate(top_indices):
     lh_idx = divmod(latent_idx, sae.model.cfg.n_heads) if is_z else (latent_idx, None)
     pct_active = frac_active[sorted_latent_idxs[lh_idx[0]]]
     print(
-        f"{hook_name} #{k}: {colinearity=:.2f}, {lh_idx=}, {probe_bases_labels[probe_idx]}, {pct_active=:.2%}"
+        f"{sae.out_hook_name} #{k}: {colinearity=:.2f}, {lh_idx=}, {probe_bases_labels[probe_idx]}, {pct_active=:.2%}"
     )
 
 # %%
 # Given (sae_idx, latent_idx), find the max activating datasets and plot the games with activation values
 top_k = 3
-sorted_latent_idx = 800
+sorted_latent_idx = 122
 
-for h in range(sae.model.cfg.n_heads):
-    latent_normed = latents_normed[h + sorted_latent_idx * sae.model.cfg.n_heads]
+heads = list(range(sae.model.cfg.n_heads)) if is_z else [0]
+for h in heads:
+    latent_normed = latents_normed[h + sorted_latent_idx * len(heads)]
     latent_probe_similarities = latent_normed @ probes_normed
     latent_probe_similarities = latent_probe_similarities.reshape(len(probe_keys), -1).T
     latent_probe_df = pd.DataFrame(
@@ -212,11 +222,11 @@ max_act_per_game = acts_post[..., latent_idx].max(dim=1)[0]
 _, top_game_idxs = t.topk(max_act_per_game, k=top_k)
 flat_dataset = datasets.concatenate_datasets([Dataset.from_dict(d) for d in batched_test_dataset])
 for game_idx in top_game_idxs.tolist():
-    game_acts = acts_post[game_idx, :, latent_idx]
+    game_acts = acts_pre[game_idx, :, latent_idx]
     plot_game(
         flat_dataset[game_idx],
         subplot_titles=[
-            f"<b style='color:red;'>{act:.2f}</b>" if act > 0 else ""
+            f"<b style='color:red;'>{act:.2f}</b>" if act > 0 else f"{act:.2f}"
             for act in game_acts.tolist()
         ],
     )
@@ -225,6 +235,8 @@ for game_idx in top_game_idxs.tolist():
 # DFA: Direct Feature Attribution
 # Each z can be split into n_head parts
 # Showed above that each part can be out projected and probed. A good (sparse) feature
-# will only show alignment from one head to the linear probe basis.
+# should only show alignment from one head to the linear probe basis.
 # DFA uses the cached A and V values to decompose z into source token contributions
-latents_normed.shape
+# These can in turn be decomposed into upstream latents
+game = test_dataset[0]
+plot_game(game)

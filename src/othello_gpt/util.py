@@ -372,6 +372,8 @@ def load_model(device, name: str = "awonga/othello-gpt-30l", eval: bool = True) 
 
     if eval:
         model.eval()
+        model.requires_grad_(False)
+
     return model
 
 
