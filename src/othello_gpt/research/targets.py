@@ -177,12 +177,12 @@ def l_if_e_target(batch, device):
     return t.where(e.bool(), l, t.nan)
 
 
-# def flip_parity_target(batch, device):
-#     # At each game position, a non-empty tile is either the same colour as when it was first played (0)
-#     # or it has been flipped to the other colour (1). I think that this is a necessary state for the
-#     # model to track in order to have an accurate board state representation.
-#     flips = t.tensor(batch["flips"], device=device)[:, :-1].int()
-#     return flips.cumsum(dim=1) % 2
+def flip_parity_target(batch, device):
+    # At each game position, a non-empty tile is either the same colour as when it was first played (0)
+    # or it has been flipped to the other colour (1). I think that this is a necessary state for the
+    # model to track in order to have an accurate board state representation.
+    flips = t.tensor(batch["flips"], device=device)[:, :-1].int()
+    return flips.cumsum(dim=1) % 2
 
 
 # def mine_flip_target(batch, device):

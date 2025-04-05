@@ -159,7 +159,7 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
 
         return l_dict, a_dict, x_recon
 
-    def forward_dataset(self, dataset: Dataset) -> dict[str, Tensor]:
+    def forward_dataset(self, dataset: Dataset, keys: list = []) -> dict[str, Tensor]:
         """
         Forward pass on a batched Dataset.
         """
@@ -184,15 +184,18 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
                 )
 
             loss_dict, acts_dict, x_recon = self.forward(x_in, x_out)
-            data.append(
-                {
-                    "x_in": x_in,
-                    "x_out": x_out,
-                    "x_recon": x_recon,
-                    **loss_dict,
-                    **acts_dict,
-                }
-            )
+            d = {
+                "x_in": x_in,
+                "x_out": x_out,
+                "x_recon": x_recon,
+                **loss_dict,
+                **acts_dict,
+            }
+
+            if keys:
+                d = {k: d[k] for k in d if k in keys}
+
+            data.append(d)
 
         # Unbatch
         forward_dict = {k: t.cat([d[k] for d in data], dim=0) for k in data[0]}

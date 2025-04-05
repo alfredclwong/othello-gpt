@@ -14,10 +14,19 @@ from datasets import load_dataset
 from jaxtyping import Float
 from plotly.subplots import make_subplots
 from torch.types import Tensor
+from tqdm import tqdm
 
 from othello_gpt.data.vis import move_id_to_text, plot_game
 from othello_gpt.model.sae import SAE, SAEConfig
 from othello_gpt.util import get_all_squares, load_model, load_probes
+from othello_gpt.research.targets import (
+    legality_target,
+    empty_target,
+    tm_target,
+    captures_target,
+    flip_parity_target,
+    move_target,
+)
 
 # %%
 device = t.device(
@@ -194,6 +203,75 @@ latents = t.cat(latents, dim=0)
 len(latent_labels), latents.shape, latent_idxs
 
 # %%
+# TODO diff with the average board state!
+# Construct a priori auto-interps
+# Weighted avg by acts_pre
+# Outputs:
+#   - board_states tensor
+#       shape: (latent, state, row, col)
+#       desc: act-weighted average binary board state, e.g. l/tm/e/bw/c/mov/parity
+#   - pos tensor
+#       shape: [latent, pos]
+n_test_large = 10240
+batch_size = 128
+cols = ["legalities", "coords", "boards", "flips", "input_ids"]
+large_batched_test_dataset = (
+    test_dataset.select_columns(cols).take(n_test_large).batch(128)
+)
+
+board_state_targets = {
+    "l": legality_target,
+    "e": empty_target,
+    "tm": tm_target,
+    "c": captures_target,
+    "f": flip_parity_target,
+    "mov": move_target,
+}
+
+d_sae = saes[0].cfg.d_sae
+n_ctx = saes[0].model.cfg.n_ctx
+board_state_acts_count = t.zeros((len(saes), d_sae), device=device)
+board_state_weights_sum = t.zeros((len(saes), d_sae), device=device)
+board_states_sum = t.zeros(
+    (len(saes), len(board_state_targets), size, size, d_sae), device=device
+)
+board_states_weighted_sum = t.zeros(
+    (len(saes), len(board_state_targets), size, size, d_sae), device=device
+)
+
+for i, batch in enumerate(tqdm(large_batched_test_dataset)):
+    board_states = [
+        (
+            board_state_target(batch, device).reshape(-1, size, size).float() * 2 - 1
+        ).nan_to_num(0)
+        for board_state_target in board_state_targets.values()
+    ]
+    for j, sae in enumerate(saes):
+        acts_type = "acts_post"
+        acts = sae.forward_dataset(
+            large_batched_test_dataset.select([i]), keys=[acts_type]
+        )[acts_type]
+        board_state_weights_sum[j] += acts.abs().sum(0)
+        board_state_acts_count[j] += (acts > 0).float().sum(0)
+        for k in range(len(board_state_targets)):
+            board_states_weighted_sum[j, k] += einops.einsum(
+                acts,
+                board_states[k],
+                "batch_pos d_sae, batch_pos row col -> row col d_sae",
+            )
+            board_states_sum[j, k] += einops.einsum(
+                (acts > 0).float(),
+                board_states[k],
+                "batch_pos d_sae, batch_pos row col -> row col d_sae",
+            )
+
+weighted_avg_board_states = (
+    # board_states_weighted_sum / n_test_large / n_ctx
+    board_states_weighted_sum / board_state_weights_sum[:, None, None, None, :]
+)
+avg_board_states = board_states_sum / board_state_acts_count[:, None, None, None, :]
+
+# %%
 def node_to_latent_idx(node):
     return latent_idxs[node[0]] + node[1]
 
@@ -209,10 +287,12 @@ def latent_idx_to_node(idx):
     return (layer.item(), offset.item())
 
 
-k = 6  # expand by k times at each node
+k = 16  # expand by k times at each node
 G = nx.Graph()
 
-root = (len(latent_idxs) - 1, 19)
+root = (len(latent_idxs) - 1, 19)  # F4
+# root = (len(latent_idxs) - 1, 0)  # A1
+# root = (len(latent_idxs) - 1, 7)  # B2
 q = [(root, None, 0)]
 while q:
     n, p, v = q.pop()
@@ -259,7 +339,8 @@ while q:
 
     upstream_alignments = upstream_latents @ target_latent
     if is_unembed:
-        _, topk_latent_idxs = t.topk(upstream_alignments, k)  # stick to positive activations
+        # _, topk_latent_idxs = t.topk(upstream_alignments, k)  # stick to positive activations
+        _, topk_latent_idxs = t.topk(upstream_alignments.abs(), k)
     else:
         _, topk_latent_idxs = t.topk(upstream_alignments.abs(), k)
 
@@ -269,19 +350,24 @@ while q:
         if abs(v) >= 0.5:
             q.append((c, n, v))
 
+# %%
 # Ensure all nodes have a subset_key attribute
 for node in G.nodes:
     G.nodes[node]["subset_key"] = node[0]
 
 # Generate the layout
-layer_sizes = [latent_idxs[i + 1] - latent_idxs[i] for i in range(len(latent_idxs) - 1)] + [latents.shape[0] - latent_idxs[-1]]
+layer_sizes = [
+    latent_idxs[i + 1] - latent_idxs[i] for i in range(len(latent_idxs) - 1)
+] + [latents.shape[0] - latent_idxs[-1]]
 pos = {}
 for node in G.nodes:
     layer = node[0]
     offset = node[1]
     layer_size = layer_sizes[layer].item()
     pos[node] = (layer, 1 - offset / layer_size)
-fig, ax = plt.subplots(figsize=(16, 32))  # Adjust the height by increasing the second value
+fig, ax = plt.subplots(
+    figsize=(16, 48)
+)  # Adjust the height by increasing the second value
 nx.draw(
     G,
     pos,
@@ -289,8 +375,8 @@ nx.draw(
     labels={node: node_to_label(node) for node in G.nodes},
     node_size=800,
     font_size=8,
-    edge_color=[G[u][v]["abs_weight"] for u, v in G.edges],
-    edge_cmap=plt.cm.BuGn,
+    edge_color=[G[u][v]["weight"] for u, v in G.edges],
+    edge_cmap=plt.cm.coolwarm,
     edge_vmin=-1,
     edge_vmax=1,
     ax=ax,
@@ -302,7 +388,9 @@ nx.draw_networkx_edge_labels(
     edge_labels=edge_labels,
     rotate=False,
     font_size=6,  # Make edge labels smaller
-    bbox=dict(boxstyle="round,pad=0.3", edgecolor="none", facecolor="none"),  # Transparent background
+    bbox=dict(
+        boxstyle="round,pad=0.3", edgecolor="none", facecolor="none"
+    ),  # Transparent background
 )
 plt.title(node_to_label(root))
 plt.show()
@@ -328,8 +416,11 @@ for n in sorted(G.nodes, key=lambda n: n[0]):
 
 acts = t.stack(acts, dim=-1)
 df = pd.DataFrame(acts.cpu(), columns=sae_node_labels)
+
+
 def highlight_positive(val):
     return "font-weight: bold; color: red" if val > 0 else ""
+
 
 df = df.loc[:, (df > 0).any()]  # Remove columns with no positive values
 styled_df = df.style.format("{:.2f}").map(highlight_positive)
@@ -337,25 +428,79 @@ display(styled_df)
 plot_game(game, subplot_size=120)
 
 # %%
-# Construct a priori auto-interps
-# Weighted avg by acts_pre
-#   1. Legalities
-#   2. Position
-#   3. Just moved
-#   4. Just captured
-#   5. Capture count
-#   6. Capture parity
-#   7. TEM
-#   8. BEW
-game.keys()
+def display_interp_dashboard(sae_idx, latent_idx):
+    fig = make_subplots(
+        rows=2,
+        cols=len(board_state_targets),
+        subplot_titles=[
+            f"{target_label} ({suffix})"
+            for suffix in ["avg", "w_avg"]
+            for target_label in board_state_targets.keys()
+        ],
+    )
+
+    x_labels = [chr(97 + i) for i in range(size)]
+    y_labels = [str(i + 1) for i in range(size)]
+
+    for target_idx, target_label in enumerate(board_state_targets.keys()):
+        avg_data = avg_board_states[sae_idx, target_idx, ..., latent_idx].cpu().numpy()
+        weighted_avg_data = weighted_avg_board_states[sae_idx, target_idx, ..., latent_idx].cpu().numpy()
+
+        # Add heatmap for average board state
+        fig.add_trace(
+            go.Heatmap(z=avg_data, colorscale="RdBu", showscale=False, zmin=-1, zmax=1),
+            row=1,
+            col=target_idx + 1,
+        )
+
+        # Add heatmap for weighted average board state
+        fig.add_trace(
+            go.Heatmap(z=weighted_avg_data, colorscale="RdBu", showscale=False, zmin=-1, zmax=1),
+            row=2,
+            col=target_idx + 1,
+        )
+
+        # Update axes for both rows
+        for row in [1, 2]:
+            fig.update_xaxes(
+                tickvals=list(range(size)),
+                ticktext=x_labels,
+                row=row,
+                col=target_idx + 1,
+                showline=True,
+                linecolor="black",
+                linewidth=1,
+                mirror=True,
+                scaleanchor="y",
+                scaleratio=1,
+                constrain="domain",
+            )
+            fig.update_yaxes(
+                tickvals=list(range(size)),
+                ticktext=y_labels,
+                row=row,
+                col=target_idx + 1,
+                showline=True,
+                linecolor="black",
+                linewidth=1,
+                mirror=True,
+                constrain="domain",
+                autorange="reversed",
+            )
+
+    fig.update_layout(
+        height=300,  # Adjust height for 2 rows
+        width=150 * len(board_state_targets),  # Adjust width per column
+        title_text=f"{saes[sae_idx].out_hook_name} #{latent_idx}",
+        margin=dict(l=10, r=10, t=50, b=10),  # Compact margins
+        showlegend=False,
+    )
+
+    fig.show()
 
 # %%
-# Outputs:
-#   - board_states tensor
-#       shape: (latent, state, row, col)
-#       desc: act-weighted average binary board state, e.g. l/t/e/m/b/w/c/mov/parity
-#   - misc list
-#       shape: [latent, ]
+for n in G.nodes():
+    if n[0] == 6:
+        display_interp_dashboard(n[0] - 1, n[1])
 
-t.tensor(test_dataset.take(1000)["legalities"])[:, :-1].shape
-
+# %%
