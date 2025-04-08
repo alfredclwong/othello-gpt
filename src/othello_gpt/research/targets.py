@@ -218,6 +218,15 @@ def pos_target(batch, device):
     return y
 
 
+def p_target(batch, device):
+    coords = t.tensor(batch["coords"], device=device)[:, :-1]
+    input_ids = t.tensor(batch["input_ids"], device=device)[:, :-1]
+    size = coords.max().item() + 1
+    y = t.zeros((*input_ids.shape, size * size), device=device)
+    t.diagonal(y, dim1=1, dim2=2).fill_(1)
+    y[..., y.shape[1]:] = t.nan
+    return y
+
 def move_target(batch, device):
     coords = t.tensor(batch["coords"], device=device)[:, :-1]
     size = coords.max().item() + 1

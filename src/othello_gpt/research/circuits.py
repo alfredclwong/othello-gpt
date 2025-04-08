@@ -26,6 +26,7 @@ from othello_gpt.research.targets import (
     captures_target,
     flip_parity_target,
     move_target,
+    p_target,
 )
 
 # %%
@@ -305,15 +306,16 @@ board_state_targets = {
     "c": captures_target,
     "f": flip_parity_target,
     "mov": move_target,
+    "p": p_target,
 }
 
 d_sae = saes[0].cfg.d_sae
 n_ctx = saes[0].model.cfg.n_ctx
 board_state_acts_count = t.zeros((len(saes), d_sae), device=device)
-board_state_weights_sum = t.zeros((len(saes), d_sae), device=device)
 board_states_sum = t.zeros(
     (len(saes), len(board_state_targets), size, size, d_sae), device=device
 )
+board_state_weights_sum = t.zeros((len(saes), d_sae), device=device)
 board_states_weighted_sum = t.zeros(
     (len(saes), len(board_state_targets), size, size, d_sae), device=device
 )
@@ -509,11 +511,12 @@ plot_game(game, subplot_size=120)
 # %%
 def display_interp_dashboard(sae_idx, latent_idx):
     fig = make_subplots(
-        rows=2,
+        rows=1,
         cols=len(board_state_targets),
         subplot_titles=[
-            f"{target_label} ({suffix})"
-            for suffix in ["avg", "w_avg"]
+            f"{target_label}"
+            # f"{target_label} ({suffix})"
+            # for suffix in ["avg", "w_avg"]
             for target_label in board_state_targets.keys()
         ],
     )
@@ -525,22 +528,22 @@ def display_interp_dashboard(sae_idx, latent_idx):
         avg_data = avg_board_states[sae_idx, target_idx, ..., latent_idx].cpu().numpy()
         weighted_avg_data = weighted_avg_board_states[sae_idx, target_idx, ..., latent_idx].cpu().numpy()
 
-        # Add heatmap for average board state
-        fig.add_trace(
-            go.Heatmap(z=avg_data, colorscale="RdBu", showscale=False, zmin=-1, zmax=1),
-            row=1,
-            col=target_idx + 1,
-        )
+        # # Add heatmap for average board state
+        # fig.add_trace(
+        #     go.Heatmap(z=avg_data, colorscale="RdBu", showscale=False, zmin=-1, zmax=1),
+        #     row=1,
+        #     col=target_idx + 1,
+        # )
 
         # Add heatmap for weighted average board state
         fig.add_trace(
             go.Heatmap(z=weighted_avg_data, colorscale="RdBu", showscale=False, zmin=-1, zmax=1),
-            row=2,
+            row=1,
             col=target_idx + 1,
         )
 
         # Update axes for both rows
-        for row in [1, 2]:
+        for row in [1]:#, 2]:
             fig.update_xaxes(
                 tickvals=list(range(size)),
                 ticktext=x_labels,
@@ -568,8 +571,8 @@ def display_interp_dashboard(sae_idx, latent_idx):
             )
 
     fig.update_layout(
-        height=300,  # Adjust height for 2 rows
-        width=150 * len(board_state_targets),  # Adjust width per column
+        height=150 * 1,  # Adjust height for 2 rows
+        width=130 * len(board_state_targets),  # Adjust width per column
         title_text=f"{saes[sae_idx].out_hook_name} #{latent_idx}",
         margin=dict(l=10, r=10, t=50, b=10),  # Compact margins
         showlegend=False,
@@ -583,3 +586,13 @@ for n in G.nodes():
         display_interp_dashboard(n[0] - 1, n[1])
 
 # %%
+for _ in range(10):
+    while True:
+        sae_idx = np.random.randint(len(saes))
+        latent_idx = np.random.randint(saes[sae_idx].cfg.d_sae)
+        if latent_idx not in dead_latent_idxs[dead_latent_idxs[:, 0] == sae_idx, 1]:
+            break
+    display_interp_dashboard(sae_idx, latent_idx)
+
+# %%
+weighted_avg_board_states[4, 0, ..., 247]
