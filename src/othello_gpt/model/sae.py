@@ -295,7 +295,9 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
         eval_dict = {}
 
         with t.inference_mode():
-            forward_dict = self.forward_dataset(batched_dataset)
+            # forward_keys = ["x_out", "acts_post", "x_recon"]
+            forward_keys = []
+            forward_dict = self.forward_dataset(batched_dataset, keys=forward_keys)
         eval_dict["x_norm"] = forward_dict["x_out"].norm(dim=-1).mean().item()
 
         dead_latent_count = (forward_dict["acts_post"] < 1e-8).all(0).sum(-1)

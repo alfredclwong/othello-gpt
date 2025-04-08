@@ -101,10 +101,10 @@ for sae in saes:
     sae.requires_grad_(False)
 
 n_test = 1024
-batched_test_dataset = test_dataset.take(n_test).batch(128)
+batched_test_dataset = test_dataset.select_columns(["input_ids"]).take(n_test).batch(128)
 with t.inference_mode():
     eval_dicts, test_forward_dicts = zip(
-        *[sae.evaluate(batched_test_dataset) for sae in saes]
+        *[sae.evaluate(batched_test_dataset) for sae in tqdm(saes)]
     )
     eval_dict = {k: [d[k] for d in eval_dicts] for k in eval_dicts[0]}
     test_forward_dict = {
@@ -117,39 +117,118 @@ with t.inference_mode():
 eval_dict
 
 # %%
-padded_W_pos = t.full((size * size, model.W_pos.shape[1]), t.nan, device=device)
-padded_W_pos[: model.W_pos.shape[0], :] = model.W_pos
-probes = load_probes(
-    probe_dir,
-    device,
-    w_u=model.W_U.detach(),
-    w_e=model.W_E.T.detach(),
-    w_p=padded_W_pos.T.detach(),
-    combos=["+t-m"],
-    model_version=model_version,
+# Extract data for the plots
+x_norm = eval_dict["x_norm"]
+alive_pct = [1 - eval_dict["n_dead"][i] / sae.cfg.d_sae for i, sae in enumerate(saes)]
+loss_recovered = eval_dict["loss_recovered_zero_abl"]
+
+# Create the bar plots
+fig = make_subplots(rows=1, cols=3, subplot_titles=["x_norm", "alive_pct", "loss_recovered"])
+
+# Plot x_norm
+fig.add_trace(
+    go.Bar(x=list(range(len(x_norm))), y=x_norm, name="x_norm"),
+    row=1, col=1
 )
-probes["pos"] = t.nn.functional.pad(
-    probes["pos"], (0, 0, 0, size * size - probes["pos"].shape[1]), value=float("nan")
+fig.add_shape(
+    type="line",
+    x0=-0.5,
+    x1=len(x_norm) - 0.5,
+    y0=model.cfg.d_model,
+    y1=model.cfg.d_model,
+    line=dict(color="black", dash="dash"),
+    row=1, col=1
 )
-probe_keys = {
-    "ee": all_squares,
-    "+t-m": actually_all_squares,
-    "c": non_corners,
-    "mov": all_squares,
-    "b": all_squares,
-    "u": all_squares,
-    "p": range(model.cfg.n_ctx),
-    "l": all_squares,
-    "pos": range(4),
-}
-probe_suffixes = {
-    k: [f"{i if k in ['p', 'pr'] else move_id_to_text(i, size)}" for i in s]
-    for k, s in probe_keys.items()
-}
-probe_labels = [f"{k}_{s}" for k in probe_keys for s in probe_suffixes[k]]
-probes_normed: Float[Tensor, "d_model n_probe n_sae"] = t.cat(
-    [probes[k][:, s, 1:] for k, s in probe_keys.items()], dim=1
+
+# Plot alive_pct
+fig.add_trace(
+    go.Bar(x=list(range(len(alive_pct))), y=alive_pct, name="alive_pct"),
+    row=1, col=2
 )
+fig = make_subplots(
+    rows=3, cols=1, subplot_titles=["x_norm", "alive_pct", "loss_recovered"]
+)
+
+# Plot x_norm
+fig.add_trace(
+    go.Bar(x=list(range(len(x_norm))), y=x_norm, name="x_norm"),
+    row=1, col=1
+)
+fig.add_shape(
+    type="line",
+    x0=-0.5,
+    x1=len(x_norm) - 0.5,
+    y0=model.cfg.d_model,
+    y1=model.cfg.d_model,
+    line=dict(color="black", dash="dash"),
+    row=1, col=1
+)
+fig.add_annotation(
+    x=-.2,
+    y=model.cfg.d_model,
+    text="d_model",
+    showarrow=False,
+    font=dict(size=10, color="black"),
+    xanchor="left",
+    yanchor="bottom",
+    row=1, col=1
+)
+
+# Plot alive_pct
+fig.add_trace(
+    go.Bar(x=list(range(len(alive_pct))), y=alive_pct, name="alive_pct"),
+    row=2, col=1
+)
+fig.add_shape(
+    type="line",
+    x0=-0.5,
+    x1=len(x_norm) - 0.5,
+    y0=model.cfg.d_model / saes[0].cfg.d_sae,
+    y1=model.cfg.d_model / saes[0].cfg.d_sae,
+    line=dict(color="black", dash="dash"),
+    row=2, col=1
+)
+fig.update_yaxes(range=[0, 1], row=2, col=1)
+fig.add_annotation(
+    x=-.2,
+    y=model.cfg.d_model / saes[0].cfg.d_sae,
+    # text=r"$\frac{d_{model}}{d_{sae}}$",
+    text="d_model / d_sae",
+    showarrow=False,
+    font=dict(size=10, color="black"),
+    xanchor="left",
+    yanchor="bottom",
+    row=2, col=1
+)
+
+# Plot loss_recovered
+fig.add_trace(
+    go.Bar(x=list(range(len(loss_recovered))), y=loss_recovered, name="loss_recovered"),
+    row=3, col=1
+)
+fig.update_yaxes(range=[0, 1], row=2, col=1)
+
+# Update layout
+fig.update_layout(
+    height=900,
+    width=600,
+    title_text="Evaluation Metrics",
+    showlegend=False,
+)
+
+# Update x-axis labels
+fig.update_xaxes(title_text="SAE Index", row=1, col=1)
+fig.update_xaxes(title_text="SAE Index", row=2, col=1)
+fig.update_xaxes(title_text="SAE Index", row=3, col=1)
+
+fig.show()
+
+# %%
+activation_threshold = 1e-8
+acts_type = "acts_post"
+acts = test_forward_dict[acts_type]
+dead_latent_idxs = t.nonzero((acts.flatten(0, 1) < activation_threshold).all(0))
+alive_latent_idxs = t.nonzero((acts.flatten(0, 1) >= activation_threshold).any(0))
 
 # %%
 latents = [model.W_E_pos / model.W_E_pos.norm(dim=-1, keepdim=True)]
@@ -266,7 +345,6 @@ for i, batch in enumerate(tqdm(large_batched_test_dataset)):
             )
 
 weighted_avg_board_states = (
-    # board_states_weighted_sum / n_test_large / n_ctx
     board_states_weighted_sum / board_state_weights_sum[:, None, None, None, :]
 )
 avg_board_states = board_states_sum / board_state_acts_count[:, None, None, None, :]
@@ -288,11 +366,12 @@ def latent_idx_to_node(idx):
 
 
 k = 16  # expand by k times at each node
+threshold = 0.5
 G = nx.Graph()
 
-root = (len(latent_idxs) - 1, 19)  # F4
+# root = (len(latent_idxs) - 1, 19)  # F4
 # root = (len(latent_idxs) - 1, 0)  # A1
-# root = (len(latent_idxs) - 1, 7)  # B2
+root = (len(latent_idxs) - 1, 7)  # B2
 q = [(root, None, 0)]
 while q:
     n, p, v = q.pop()
@@ -347,7 +426,7 @@ while q:
     for latent_idx in topk_latent_idxs:
         c = latent_idx_to_node(latent_idx)
         v = round(upstream_alignments[latent_idx].item(), 2)
-        if abs(v) >= 0.5:
+        if abs(v) >= threshold:
             q.append((c, n, v))
 
 # %%
