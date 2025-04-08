@@ -1,6 +1,6 @@
 **/wandb/
 /data/probes/*.pt
-!data/probes/probe_300k_*
+!data/probes/probe_600k_*
 .DS_Store
 scratch.ipynb
 *secret*
