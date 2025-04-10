@@ -107,6 +107,7 @@ def t_npt_target(batch, device, pad_nan=True):
 
     return target.flatten(2)
 
+
 def prev_empty_target(batch, device, n_shift=1):
     e = empty_target(batch, device)
     n_batch = e.shape[0]
@@ -146,7 +147,9 @@ def theirs_empty_mine_target(batch, device) -> Float[t.Tensor, "batch pos n_out"
     return boards.flatten(2)
 
 
-def prev_tem_target(batch, device, n_shift=1, pad_nan=True) -> Float[t.Tensor, "batch pos n_out"]:
+def prev_tem_target(
+    batch, device, n_shift=1, pad_nan=True
+) -> Float[t.Tensor, "batch pos n_out"]:
     tem = theirs_empty_mine_target(batch, device)
 
     n_batch = tem.shape[0]
@@ -181,8 +184,12 @@ def flip_parity_target(batch, device):
     # At each game position, a non-empty tile is either the same colour as when it was first played (0)
     # or it has been flipped to the other colour (1). I think that this is a necessary state for the
     # model to track in order to have an accurate board state representation.
+    e = empty_target(batch, device)
     flips = t.tensor(batch["flips"], device=device)[:, :-1].int()
-    return flips.cumsum(dim=1) % 2
+    fs = flips.cumsum(dim=1)
+    fp = fs % 2
+    # return t.where(~e.bool(), fp.flatten(2), t.nan)
+    return fp.flatten(2)
 
 
 # def mine_flip_target(batch, device):
@@ -224,15 +231,16 @@ def p_target(batch, device):
     size = coords.max().item() + 1
     y = t.zeros((*input_ids.shape, size * size), device=device)
     t.diagonal(y, dim1=1, dim2=2).fill_(1)
-    y[..., y.shape[1]:] = t.nan
+    y[..., y.shape[1] :] = t.nan
     return y
+
 
 def move_target(batch, device):
     coords = t.tensor(batch["coords"], device=device)[:, :-1]
     size = coords.max().item() + 1
     moves = t.zeros((*coords.shape[:-1], size, size), device=device)
     c0 = size // 2 - 1
-    moves[..., [c0, c0, c0+1, c0+1], [c0, c0+1, c0, c0+1]] = t.nan
+    moves[..., [c0, c0, c0 + 1, c0 + 1], [c0, c0 + 1, c0, c0 + 1]] = t.nan
     moves[
         t.arange(moves.shape[0]).unsqueeze(1),
         t.arange(moves.shape[1]),
@@ -242,7 +250,7 @@ def move_target(batch, device):
     return moves.flatten(2)
 
 
-def captures_target(batch, device, include_move = False):
+def captures_target(batch, device, include_move=False):
     # Hypothesis: each token tracks the tiles that it captured when the move was played
     # After H0, we have [my moves; their moves; my moves flipped; their moves flipped]
     # This gives us the

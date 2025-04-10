@@ -24,7 +24,7 @@ device = t.device(
     else "cpu"
 )
 
-root_dir = Path().cwd()#.parent.parent.parent
+root_dir = Path().cwd().parent.parent.parent
 data_dir = root_dir / "data"
 probe_dir = data_dir / "probes"
 
@@ -52,7 +52,7 @@ non_edges = [i for i in range(size * size) if i not in edges]
 # %%
 cfg = SAEConfig(
     d_in=model.cfg.d_model,
-    d_sae=1024,
+    d_sae=2048,
     in_hook_layer=2,
     out_hook_layer=2,
     # in_hook_suffix="attn.hook_z",

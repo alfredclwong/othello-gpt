@@ -61,6 +61,8 @@ class SAEConfig:
     weight_normalize_eps: float = 1e-8
     architecture: Literal["standard", "gated", "jumprelu"] = "standard"
 
+    use_b_dec: bool = True
+
 
 class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
     W_enc: Float[Tensor, "d_in d_sae"]
@@ -110,9 +112,11 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
         )
         self.W_dec.data = self.W_dec_normalized
         self.b_enc = t.nn.Parameter(t.zeros(self.cfg.d_sae))
-        self.b_dec = t.nn.Parameter(t.zeros(self.cfg.d_in))
+        self.b_dec = t.zeros(self.cfg.d_in, device=device)
+        if cfg.use_b_dec:
+            self.b_dec = t.nn.Parameter(self.b_dec)
 
-        self.to(self.device)
+        self.to(device)
 
     @property
     def W_dec_normalized(self) -> Float[Tensor, "d_sae d_in"]:

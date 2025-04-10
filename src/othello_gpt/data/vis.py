@@ -65,7 +65,7 @@ def plot_game(
                 for _ in range(n_moves)
             ]
         )
-    margin = subplot_size // 8
+    margin = subplot_size // 10
 
     n_rows = (n_moves - 1) // n_cols + 1
 
