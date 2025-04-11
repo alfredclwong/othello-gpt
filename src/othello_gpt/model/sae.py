@@ -13,6 +13,7 @@ import wandb
 from tqdm import tqdm
 import einops
 from itertools import product
+from enum import Enum, auto
 
 
 def linear_lr(step, steps):
@@ -25,6 +26,29 @@ def constant_lr(*_):
 
 def cosine_decay_lr(step, steps):
     return np.cos(0.5 * np.pi * step / (steps - 1))
+
+
+# hook_embed
+# hook_pos_embed
+# blocks.0.hook_resid_pre
+# blocks.0.ln1.hook_scale
+# blocks.0.ln1.hook_normalized
+# blocks.0.attn.hook_q
+# blocks.0.attn.hook_k
+# blocks.0.attn.hook_v
+# blocks.0.attn.hook_attn_scores
+# blocks.0.attn.hook_pattern
+# blocks.0.attn.hook_z
+# blocks.0.hook_attn_out
+# blocks.0.hook_resid_mid
+# blocks.0.ln2.hook_scale
+# blocks.0.ln2.hook_normalized
+# blocks.0.mlp.hook_pre
+# blocks.0.mlp.hook_post
+# blocks.0.hook_mlp_out
+# blocks.0.hook_resid_post
+# ln_final.hook_scale
+# ln_final.hook_normalized
 
 
 @dataclass(frozen=True)
@@ -62,6 +86,15 @@ class SAEConfig:
     architecture: Literal["standard", "gated", "jumprelu"] = "standard"
 
     use_b_dec: bool = True
+    dead_threshold: float = 1e-8
+
+
+class SAEType(Enum):
+    LN_EMBED = auto()
+    LN1 = auto()
+    ATTN_Z = auto()
+    LN2 = auto()
+    TRANSCODER = auto()
 
 
 class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
@@ -95,7 +128,9 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
             model.W_Q[cfg.out_hook_layer + 1 :],
             model.W_K[cfg.out_hook_layer + 1 :],
             model.W_V[cfg.out_hook_layer + 1 :],
-            model.W_in[cfg.out_hook_layer + int(cfg.out_hook_suffix == "hook_mlp_out") :],
+            model.W_in[
+                cfg.out_hook_layer + int(cfg.out_hook_suffix == "hook_mlp_out") :
+            ],
             model.W_U.unsqueeze(0),
         ]
         downstream_weights = t.cat(
@@ -123,6 +158,21 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
         return self.W_dec / (
             self.W_dec.norm(dim=-1, keepdim=True) + self.cfg.weight_normalize_eps
         )
+
+    @property
+    def sae_type(self) -> SAEType:
+        if self.cfg.in_hook_layer == self.cfg.out_hook_layer:
+            if self.in_hook_name == self.out_hook_name:
+                if self.cfg.in_hook_suffix == "attn.hook_z":
+                    return SAEType.ATTN_Z
+                if self.in_hook_name == "blocks.0.ln1.hook_normalized":
+                    return SAEType.LN_EMBED
+            else:
+                if self.cfg.in_hook_suffix == "ln2.hook_normalized" and self.cfg.out_hook_suffix == "hook_mlp_out":
+                    return SAEType.TRANSCODER
+                if self.cfg.in_hook_suffix == "hook_resid_pre" and self.cfg.out_hook_suffix == "ln1.hook_normalized":
+                    return SAEType.LN1
+        raise ValueError("Unrecognised SAE type", self)
 
     def forward(
         self,
@@ -304,8 +354,6 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
             forward_dict = self.forward_dataset(batched_dataset, keys=forward_keys)
         eval_dict["x_norm"] = forward_dict["x_out"].norm(dim=-1).mean().item()
 
-        dead_latent_count = (forward_dict["acts_post"] < 1e-8).all(0).sum(-1)
-        frac_active = (forward_dict["acts_post"] >= 1e-8).float().mean(0).mean(-1)
         input_ids = t.cat(
             [
                 t.tensor(d["input_ids"], device=self.device)[:, :-1]
@@ -327,8 +375,18 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
             k: v.mean().item() for k, v in forward_dict.items() if k.startswith("L_")
         }
         eval_dict.update(loss_dict)
-        eval_dict["n_dead"] = dead_latent_count.item()
-        eval_dict["frac_active"] = frac_active.item()
+        eval_dict["n_dead"] = (
+            (forward_dict["acts_post"] < self.cfg.dead_threshold).all(0).sum(-1).item()
+        )
+        eval_dict["n_alive"] = self.cfg.d_sae - eval_dict["n_dead"]
+        eval_dict["l0"] = (
+            (forward_dict["acts_post"] >= self.cfg.dead_threshold)
+            .float()
+            .sum(-1)
+            .mean()
+            .item()
+        )
+        eval_dict["frac_active"] = eval_dict["l0"] / eval_dict["n_alive"]
 
         with t.inference_mode():
             self.model.reset_hooks()
@@ -390,7 +448,7 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
             - Set new values of W_dec and W_enc to be these normalized vectors, at each dead neuron
             - Set b_enc to be zero, at each dead neuron
         """
-        dead_neurons = (frac_active_in_window < 1e-8).all(0)
+        dead_neurons = (frac_active_in_window < self.cfg.dead_threshold).all(0)
         print(
             f"Resampling {dead_neurons.sum().item()}/{dead_neurons.numel()} dead neurons..."
         )

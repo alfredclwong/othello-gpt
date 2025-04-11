@@ -33,6 +33,38 @@ train_dataset = dataset_dict["train"]
 test_dataset = dataset_dict["test"]
 
 # %%
+d_saes = [256, 1024, 1024, 1024, 1024, 2048]
+sparsity_coeffs = [0.02, 0.001, 0.01, 0.002, 0.01, 0.002]
+lrs = [1e-4, 1e-3, 2e-3, 2e-3, 1e-2, 2e-3]
+hook_suffixes = [
+    ("hook_resid_pre", "ln1.hook_normalized"),
+    ("hook_resid_mid", "ln2.hook_normalized"),
+]
+sae_params = product(range(model.cfg.n_layers), hook_suffixes)
+for i, (hook_layer, (in_hook_suffix, out_hook_suffix)) in enumerate(sae_params):
+    sae_cfg = SAEConfig(
+        d_in=model.cfg.d_model,
+        d_sae=d_saes[i],
+        in_hook_layer=hook_layer,
+        in_hook_suffix=in_hook_suffix,
+        out_hook_layer=hook_layer,
+        out_hook_suffix=out_hook_suffix,
+        lr=lrs[i],
+        sparsity_coeff=sparsity_coeffs[i],
+        n_epochs=2,
+        resample_freq=9000,
+        resample_window=2000,
+        use_b_dec=False,  # post-ln input
+    )
+    print(sae_cfg)
+    sae = SAE(sae_cfg, model, device)
+    sae.optimise(train_dataset, test_dataset.take(1024))
+    sae_name = f"{model_name}-sae-{sae.in_hook_name}"
+    if in_hook_suffix != out_hook_suffix:
+        sae_name += f"-{sae.out_hook_name}"
+    sae.push_to_hub(sae_name)
+
+# %%
 prev_sparsity_coeffs = [0.05, 0.001, 0.02, 0.003, 0.02, 0.005]
 sparsity_coeffs = [0.05, 0.001, 0.02, 0.005, 0.02, 0.005]
 prev_lrs = [2e-3, 2e-3, 5e-3, 5e-3, 2e-2, 1e-2]
