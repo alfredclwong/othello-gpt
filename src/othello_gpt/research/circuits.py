@@ -71,7 +71,7 @@ edges = [
 ]
 non_edges = [i for i in range(size * size) if i not in edges]
 
-root_dir = Path().cwd().parent.parent.parent
+root_dir = Path().cwd()  # .parent.parent.parent
 data_dir = root_dir / "data"
 probe_dir = data_dir / "probes"
 padded_W_pos = t.full((size * size, model.W_pos.shape[1]), t.nan, device=device)
@@ -165,17 +165,19 @@ for sae, test_forward_dict, alive_idxs in zip(saes, test_forward_dicts, sae_aliv
         out_latents.append(sae.W_dec_normalized[alive_idxs])
         latent_labels += [f"m{layer}f{i}" for i in range(len(alive_idxs))]
 
-    elif sae.sae_type is SAEType.LN_EMBED:
-        in_latents.append(sae.W_dec_normalized[alive_idxs])
-        out_latents.append(sae.W_dec_normalized[alive_idxs])
-        latent_labels += [f"ln{layer}f{i}" for i in range(len(alive_idxs))]
+    # elif sae.sae_type is SAEType.LN_EMBED:
+    #     in_latents.append(sae.W_dec_normalized[alive_idxs])
+    #     out_latents.append(sae.W_dec_normalized[alive_idxs])
+    #     latent_labels += [f"ln{layer}f{i}" for i in range(len(alive_idxs))]
 
-    elif sae.sae_type is SAEType.LN1:
+    elif sae.sae_type in [SAEType.LN1, SAEType.LN2, SAEType.LN_FINAL]:
         w_in = sae.W_enc.T
         w_in = w_in / w_in.norm(dim=-1, keepdim=True)
         in_latents.append(w_in[alive_idxs])
         out_latents.append(sae.W_dec_normalized[alive_idxs])
-        latent_labels += [f"ln{layer}.1f{i}" for i in range(len(alive_idxs))]
+        latent_labels += [
+            f"{sae.sae_type.name}l{layer}f{i}" for i in range(len(alive_idxs))
+        ]
 
     else:
         raise ValueError("Unrecognised sae type")
@@ -192,7 +194,8 @@ latent_idxs = t.tensor(
 (
     len(latent_labels),
     [(x.shape, y.shape) for x, y in zip(in_latents, out_latents)],
-    latent_idxs,
+    ", ".join(map(str, latent_idxs)),
+    [latent_labels[i] for i in latent_idxs[:-1]],
 )
 
 # %%
@@ -307,11 +310,12 @@ type Node = tuple[int, int]
 
 class NodeType(Enum):
     EMBED = auto()
-    LN_EMBED = auto()
+    # LN_EMBED = auto()
     LN1 = auto()
     ATTN_Z = auto()
     LN2 = auto()
     TRANSCODER = auto()
+    LN_FINAL = auto()
     UNEMBED = auto()
 
 
@@ -323,14 +327,18 @@ def get_node_type(n: Node, saes: list[SAE]) -> NodeType:
 
     sae: SAE = saes[n[0] - 1]
     st = sae.sae_type
-    if st is SAEType.LN_EMBED:
-        return NodeType.LN_EMBED
+    # if st is SAEType.LN_EMBED:
+    #     return NodeType.LN_EMBED
     if st is SAEType.LN1:
         return NodeType.LN1
     if st is SAEType.ATTN_Z:
         return NodeType.ATTN_Z
+    if st is SAEType.LN2:
+        return NodeType.LN2
     if st is SAEType.TRANSCODER:
         return NodeType.TRANSCODER
+    if st is SAEType.LN_FINAL:
+        return NodeType.LN_FINAL
 
     raise ValueError("Unrecognised node type", n)
 
@@ -449,7 +457,10 @@ def display_auto_interp_data(nodes: list[Node], G=None):
 
 
 def display_probe_alignments(
-    nodes: list[Node], G=None, probe_keys: None | list[str] = None, last_is_root: bool = True
+    nodes: list[Node],
+    G=None,
+    probe_keys: None | list[str] = None,
+    last_is_root: bool = True,
 ):
     if probe_keys is None:
         probe_keys = ["u", "l", "ee", "+t-m", "c", "mov"]
@@ -610,13 +621,30 @@ def get_upstream_nodes(
 ]:
     node_type = get_node_type(n, saes)
 
-    if node_type == NodeType.EMBED:
+    if node_type is NodeType.EMBED:
         return [], [], [], []
 
     in_latent = in_latents[n[0]][n[1]]
 
-    # Collate latents and apply necessary transforms
-    upstream_latents = t.cat(out_latents[: n[0]], dim=0)
+    # Collate upstream latents
+    # Filter upstream layers:
+    #   For target attn_z, only the previous ln1 upstream is valid
+    #   For target transcoder, only the previous ln2 upstream is valid
+    #   For target ln, any non-ln upstream is valid
+    ln_types = [NodeType.LN1, NodeType.LN2, NodeType.LN_FINAL]
+    if node_type in ln_types:
+        n0s = [
+            n0
+            for n0 in range(n[0])
+            if get_node_type((n0, 0), saes) not in ln_types
+        ]
+    else:
+        n0s = [n[0] - 1]
+    upstream_idxs = np.cumsum([0] + [latent_idxs[n0 + 1] - latent_idxs[n0] for n0 in n0s])
+    upstream_latents = t.cat([out_latents[n0] for n0 in n0s], dim=0)
+    # upstream_latents = t.cat(out_latents[: n[0]], dim=0)
+
+    # Apply v transform if necessary
     if node_type is NodeType.ATTN_Z:
         # Project upstream latents into V space
         sae = saes[n[0] - 1]
@@ -628,6 +656,7 @@ def get_upstream_nodes(
         )
 
         upstream_latents = upstream_latents @ get_w_v(n, saes)
+
     upstream_latents = upstream_latents / upstream_latents.norm(
         dim=-1, keepdim=True
     )  # shape: n_upstream d_latent
@@ -650,7 +679,12 @@ def get_upstream_nodes(
         v = upstream_alignments[upstream_idx]
         if v.abs() < threshold:
             break
-        c = latent_idx_to_node(upstream_idx, latent_idxs)
+
+        # upstream_idx indexes upstream_latents, which is split into parts of len(latext_idxs[n0])
+        # find idx of the n0s, then use this to idx latent_idxs
+        n0_idx = np.searchsorted(upstream_idxs, upstream_idx, side="right") - 1
+        latent_idx = upstream_idx + latent_idxs[n0s[n0_idx]] - upstream_idxs[n0_idx]
+        c = latent_idx_to_node(latent_idx, latent_idxs)
         nodes.append(c)
         alignments.append(v.item())
 
@@ -704,7 +738,7 @@ def get_coactivation_matrix(nodes: list[Node]):
                 acts = sae.forward_dataset(
                     large_batched_test_dataset.select([i]).select_columns("input_ids"),
                     keys=[acts_type],
-                )[acts_type].float()
+                )[acts_type].float()[:, sae_alive_idxs[j]]
 
             n_head = sae.model.cfg.n_heads
             for n in nodes_by_layer[j + 1]:
@@ -738,26 +772,30 @@ def get_coactivation_matrix(nodes: list[Node]):
 def trace_circuit(
     root,
     k: int,
-    threshold: float,
-    saes,
+    thresholds: dict[NodeType, float],
+    saes: list[SAE],
     pos_only=False,
     dfs=True,
-    node_limit: int = 100,
+    node_limit=100,
+    max_depth=None,
 ):
     if pos_only:
         k *= 2
     G = nx.DiGraph()
-    q = [(root, None, 0)]
-    while q and G.number_of_nodes() < node_limit:
-        n, p, v = q.pop() if dfs else q.pop(0)
+    q = [(root, None, 0, 0)]
+    while q and (node_limit is None or G.number_of_nodes() < node_limit):
+        n, p, v, d = q.pop() if dfs else q.pop(0)
         G.add_node(n)
         if p is not None:
             G.add_edge(p, n, weight=v, abs_weight=abs(v))
+        if max_depth is not None and d == max_depth:
+            continue
+        threshold = thresholds.get(get_node_type(n, saes), 0.1)
         cs, vs, _, _ = get_upstream_nodes(n, saes, k, threshold)
         for c, v in zip(cs, vs):
             if pos_only and v < 0:
                 continue
-            q.append((c, n, v))
+            q.append((c, n, v, d + 1))
 
     # Ensure all nodes have a subset_key attribute for multipartite layouts
     for node in G.nodes:
@@ -814,7 +852,6 @@ def draw_graph(G, latent_idxs, latent_labels, figsize=(16, 48), linear_spacing=T
             boxstyle="round,pad=0.3", edgecolor="none", facecolor="none"
         ),  # Transparent background
     )
-    plt.title(node_to_label(root, latent_idxs, latent_labels))
     plt.show()
 
 
@@ -855,7 +892,7 @@ def get_act_df(nodes: list[Node], game_idx, filter_inactive: bool = True):
                 n_head = sae.model.cfg.n_heads
                 latent_idx //= n_head
             acts.append(
-                test_forward_dicts[sae_idx]["acts_pre"][game_idx, :, latent_idx]
+                test_forward_dicts[sae_idx]["acts_pre"][game_idx, :, sae_alive_idxs[sae_idx][latent_idx]]
             )
     acts = t.stack(acts, dim=-1)
 
@@ -1003,11 +1040,14 @@ def display_colinearities(nodes: list[Node], last_is_root: bool = True):
     fig.show()
 
 
-def display_node_interp(n: Node, saes, latent_idxs, latent_labels, k=8, threshold=0.5):
+def display_node_interp(
+    n: Node, saes, latent_idxs, latent_labels, k=8, threshold=0.5, levels=2
+):
     # 1a. Show df of aligned upstream latents: alignment, necessary/sufficient co-activating stats, frac active
     # 1b. Same for downstream latents
     # 2. Show auto interp data for all relevant latents
     # 3. Show a max activating/unactivating game
+    # TODO frac active
 
     print(f"Node {node_to_label(n, latent_idxs, latent_labels)} {n} interp dash")
 
@@ -1049,11 +1089,11 @@ def display_node_interp(n: Node, saes, latent_idxs, latent_labels, k=8, threshol
 
     # 3.
     game_acts = get_game_acts(H.nodes, act_type="acts_pre")
-    # root_idx = list(H.nodes).index(n)
-    # max_game_idx = game_acts[..., root_idx].argmax().item()
-    # min_game_idx = game_acts[..., root_idx].argmin().item()
-    max_game_idx = game_acts.flatten(1).sum(1).argmax().item()
-    min_game_idx = game_acts.flatten(1).sum(1).argmin().item()
+    root_idx = list(H.nodes).index(n)
+    max_game_idx = game_acts[..., root_idx].argmax().item()
+    min_game_idx = game_acts[..., root_idx].argmin().item()
+    # max_game_idx = game_acts.flatten(1).sum(1).argmax().item()
+    # min_game_idx = game_acts.flatten(1).sum(1).argmin().item()
     max_df = get_act_df(all_nodes, max_game_idx, filter_inactive=False)
     min_df = get_act_df(all_nodes, min_game_idx, filter_inactive=False)
 
@@ -1061,6 +1101,26 @@ def display_node_interp(n: Node, saes, latent_idxs, latent_labels, k=8, threshol
     plot_game(test_dataset[max_game_idx], subplot_size=100, title="Max activating game")
     display(min_df)
     plot_game(test_dataset[min_game_idx], subplot_size=100, title="Min activating game")
+
+# %%
+k = 8  # expand by k times at each node
+root = (len(latent_idxs) - 2, 0)  # A1
+# root = (len(latent_idxs) - 3, 20)
+# root = (len(latent_idxs) - 2, 19)  # F4
+# root = (len(latent_idxs) - 2, 7)  # B2
+thresholds = {
+    NodeType.UNEMBED: 0.3,
+    NodeType.LN_FINAL: 0.2,
+    NodeType.LN2: 0.5,
+    NodeType.LN1: 0.5,
+    NodeType.TRANSCODER: 0.5,
+    NodeType.ATTN_Z: 0.2,
+}
+G = trace_circuit(
+    root, k, thresholds, saes, pos_only=True, dfs=False, node_limit=500, max_depth=None
+)
+draw_graph(G, latent_idxs, latent_labels)
+# display_auto_interp_data(G.nodes, G)
 
 
 # %%
@@ -1070,18 +1130,10 @@ root = (len(saes) + 1, 0)  # A1
 # root = (len(saes), 225)
 # root = (1, 443 * 8 + 6)
 # root = latent_idx_to_node(latent_labels.index("m2f830"), latent_idxs)
-# display_node_interp(root, saes, latent_idxs, latent_labels, k=8, threshold=0.5)
-display_node_interp((1, 0), saes, latent_idxs, latent_labels, k=8, threshold=0)
+display_node_interp(root, saes, latent_idxs, latent_labels, k=8, threshold=0.1)
 
 # %%
-k = 16  # expand by k times at each node
-threshold = 0.5
-root = (len(latent_idxs) - 2, 0)  # A1
-# root = (len(latent_idxs) - 2, 19)  # F4
-# root = (len(latent_idxs) - 2, 7)  # B2
-G = trace_circuit(root, k, threshold, saes, pos_only=True, dfs=False, node_limit=100)
-draw_graph(G, latent_idxs, latent_labels)
-# display_auto_interp_data(G.nodes, G)
+in_latents[root[0]][root[1]]
 
 # %%
 # n0s = np.random.randint(len(latent_idxs) - 1, size=10)

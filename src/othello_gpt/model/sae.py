@@ -90,11 +90,12 @@ class SAEConfig:
 
 
 class SAEType(Enum):
-    LN_EMBED = auto()
+    # LN_EMBED = auto()
     LN1 = auto()
     ATTN_Z = auto()
     LN2 = auto()
     TRANSCODER = auto()
+    LN_FINAL = auto()
 
 
 class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
@@ -116,7 +117,10 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
         self.model = model
         self.model.requires_grad_(False)
         self.in_hook_name = f"blocks.{cfg.in_hook_layer}.{cfg.in_hook_suffix}"
-        self.out_hook_name = f"blocks.{cfg.out_hook_layer}.{cfg.out_hook_suffix}"
+        if self.cfg.out_hook_suffix == "ln_final.hook_normalized":
+            self.out_hook_name = "ln_final.hook_normalized"
+        else:
+            self.out_hook_name = f"blocks.{cfg.out_hook_layer}.{cfg.out_hook_suffix}"
 
         self.post_matrix = (
             t.eye(cfg.d_in, device=device)
@@ -165,13 +169,17 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
             if self.in_hook_name == self.out_hook_name:
                 if self.cfg.in_hook_suffix == "attn.hook_z":
                     return SAEType.ATTN_Z
-                if self.in_hook_name == "blocks.0.ln1.hook_normalized":
-                    return SAEType.LN_EMBED
+                # if self.in_hook_name == "blocks.0.ln1.hook_normalized":
+                #     return SAEType.LN_EMBED
             else:
                 if self.cfg.in_hook_suffix == "ln2.hook_normalized" and self.cfg.out_hook_suffix == "hook_mlp_out":
                     return SAEType.TRANSCODER
                 if self.cfg.in_hook_suffix == "hook_resid_pre" and self.cfg.out_hook_suffix == "ln1.hook_normalized":
                     return SAEType.LN1
+                if self.cfg.in_hook_suffix == "hook_resid_mid" and self.cfg.out_hook_suffix == "ln2.hook_normalized":
+                    return SAEType.LN2
+                if self.cfg.in_hook_suffix == "hook_resid_post" and self.cfg.out_hook_suffix == "ln_final.hook_normalized":
+                    return SAEType.LN_FINAL
         raise ValueError("Unrecognised SAE type", self)
 
     def forward(
@@ -228,7 +236,7 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
                 _, cache = self.model.run_with_cache(
                     input_ids,
                     names_filter=names_filter,
-                    stop_at_layer=stop_at_layer,
+                    stop_at_layer=stop_at_layer if stop_at_layer < self.model.cfg.n_layers else None,
                 )
                 x_in: Float[Tensor, "(batch pos) d_model"] = (
                     cache[self.in_hook_name].flatten(2).flatten(0, 1)
@@ -388,6 +396,13 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
         )
         eval_dict["frac_active"] = eval_dict["l0"] / eval_dict["n_alive"]
 
+        # if self.out_hook_name == "ln_final.hook_normalized":
+        #     # Skip patch evals
+        #     eval_dict["kl_div"] = None
+        #     eval_dict["loss_recovered_zero_abl"] = None
+        #     eval_dict["loss_recovered_mean_abl"] = None
+        #     return eval_dict, forward_dict
+
         with t.inference_mode():
             self.model.reset_hooks()
             loss_zero = self.model.run_with_hooks(
@@ -396,12 +411,12 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
                 fwd_hooks=[(self.out_hook_name, zero_ablation_hook)],
             )
 
-            self.model.reset_hooks()
-            loss_mean = self.model.run_with_hooks(
-                input_ids,
-                return_type="loss",
-                fwd_hooks=[(self.out_hook_name, mean_ablation_hook)],
-            )
+            # self.model.reset_hooks()
+            # loss_mean = self.model.run_with_hooks(
+            #     input_ids,
+            #     return_type="loss",
+            #     fwd_hooks=[(self.out_hook_name, mean_ablation_hook)],
+            # )
 
             self.model.reset_hooks()
             logits_recon, loss_recon = self.model.run_with_hooks(
@@ -418,11 +433,11 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
             .mean()
             .item()
         )
-        loss_recovered_mean = (
-            (1 - (loss_recon - loss_original) / (loss_mean - loss_original))
-            .mean()
-            .item()
-        )
+        # loss_recovered_mean = (
+        #     (1 - (loss_recon - loss_original) / (loss_mean - loss_original))
+        #     .mean()
+        #     .item()
+        # )
         kl_div = t.nn.functional.kl_div(
             logits_recon.log_softmax(dim=-1),
             logits_original.softmax(dim=-1),
@@ -430,7 +445,7 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
         )
         eval_dict["kl_div"] = kl_div.item()
         eval_dict["loss_recovered_zero_abl"] = loss_recovered_zero
-        eval_dict["loss_recovered_mean_abl"] = loss_recovered_mean
+        # eval_dict["loss_recovered_mean_abl"] = loss_recovered_mean
 
         return eval_dict, forward_dict
 

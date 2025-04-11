@@ -1,48 +1,48 @@
 from itertools import product
-from transformer_lens import HookedTransformer
+
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from transformer_lens import HookedTransformer
 
-from othello_gpt.model.sae import SAE, SAEConfig
+from othello_gpt.model.sae import SAE, SAEConfig, SAEType
 
 
 def load_saes(model: HookedTransformer, model_name: str, device: str) -> list[SAE]:
-    # embed_cfg = SAEConfig(
-    #     d_in=model.cfg.d_model,
-    #     d_sae=1024,
-    #     in_hook_layer=0,
-    #     in_hook_suffix="ln1.hook_normalized",
-    #     out_hook_layer=0,
-    #     out_hook_suffix="ln1.hook_normalized",
-    # )
-    embed_ln1_cfg = SAEConfig(
-        d_in=model.cfg.d_model,
-        d_sae=1024,
-        in_hook_layer=0,
-        in_hook_suffix="hook_resid_pre",
-        out_hook_layer=0,
-        out_hook_suffix="ln1.hook_normalized",
-    )
+    ln1_hook_suffixes = ("hook_resid_pre", "ln1.hook_normalized")
     attn_hook_suffixes = ("attn.hook_z", "attn.hook_z")
+    ln2_hook_suffixes = ("hook_resid_mid", "ln2.hook_normalized")
     mlp_hook_suffixes = ("ln2.hook_normalized", "hook_mlp_out")
-    hook_suffixes = [attn_hook_suffixes, mlp_hook_suffixes]
-    cfgs = [embed_ln1_cfg] + [
+    hook_suffixes = [
+        ln1_hook_suffixes,
+        attn_hook_suffixes,
+        ln2_hook_suffixes,
+        mlp_hook_suffixes,
+    ]
+    sae_params = list(product(range(model.cfg.n_layers), hook_suffixes))
+    sae_params.append((2, ("hook_resid_post", "ln_final.hook_normalized")))
+    d_saes = [
+        1024, 1024, 1024, 1024,
+        1024, 1024, 1024, 1024,
+        1024, 1024, 1024, 2048,
+        1024,
+    ]
+    cfgs = [
         SAEConfig(
             d_in=model.cfg.d_model,
-            d_sae=2048 if i == 2 and "mlp" in out_hook_suffix else 1024,
-            in_hook_layer=i,
-            out_hook_layer=i,
+            d_sae=d_saes[i],
+            in_hook_layer=hook_layer,
+            out_hook_layer=hook_layer,
             in_hook_suffix=in_hook_suffix,
             out_hook_suffix=out_hook_suffix,
         )
-        for i, (in_hook_suffix, out_hook_suffix) in product(
-            range(model.cfg.n_layers), hook_suffixes
-        )
+        for i, (hook_layer, (in_hook_suffix, out_hook_suffix)) in enumerate(sae_params)
     ]
     hook_names = [
         f"blocks.{cfg.out_hook_layer}.{cfg.out_hook_suffix}"
         if cfg.in_hook_suffix == cfg.out_hook_suffix
+        else f"blocks.{cfg.in_hook_layer}.{cfg.in_hook_suffix}-ln_final.hook_normalized"
+        if cfg.out_hook_suffix == "ln_final.hook_normalized"
         else f"blocks.{cfg.in_hook_layer}.{cfg.in_hook_suffix}-blocks.{cfg.out_hook_layer}.{cfg.out_hook_suffix}"
         for cfg in cfgs
     ]
@@ -78,12 +78,21 @@ def plot_evals(
         subplot_titles=metrics,
     )
     fig.update_layout(
-        showlegend=False,
+        showlegend=True,
         height=240 * n_row,
-        width=240 * n_col,
+        width=240 * n_col + 300,
         title_text="SAE Metrics",
         margin=dict(t=50, l=10, r=10, b=10),
     )
+
+    layers = list(range(model.cfg.n_layers))
+    sae_names = [sae.sae_type.name for sae in saes]
+    sae_names = sae_names[-len(set(sae_names)):]
+    n_exc_final = len(sae_names) - 1 if "LN_FINAL" in sae_names else len(sae_names)
+    colors = {
+        name: f"hsva({i * 80 % 256},150,50,0.7)"
+        for i, name in enumerate(sae_names)
+    }
 
     for i, (metric, y_range) in enumerate(zip(metrics, y_ranges)):
         row, col = (x + 1 for x in divmod(i, n_col))
@@ -102,21 +111,34 @@ def plot_evals(
             y_data = eval_dict[metric]
             text_dict = {}
 
-        fig.add_trace(
-            go.Bar(x=list(range(len(y_data))), y=y_data, name=metric, **text_dict),
-            row=row,
-            col=col,
-        )
+        for j, name in enumerate(sae_names):
+            is_ln_final = name == "LN_FINAL"
+            start_idx = -1 if is_ln_final else j
+            end_idx = -1 if j == 0 and "LN_FINAL" in sae_names else None
+            fig.add_trace(
+                go.Bar(
+                    x=[model.cfg.n_layers - 1] if is_ln_final else layers,
+                    y=y_data[start_idx:end_idx:n_exc_final],
+                    name=name,
+                    legendgroup=name,
+                    marker_color=colors[name],
+                    showlegend=row * col== 1,
+                    **text_dict,
+                ),
+                row=row,
+                col=col,
+            )
+
         fig.update_yaxes(range=y_range, row=row, col=col)
         if row == n_row:
-            fig.update_xaxes(title_text="SAE Index", row=row, col=col)
+            fig.update_xaxes(title_text="Layer", row=row, col=col)
 
-        if metric == "x_norm":
+        if metric in ["x_norm", "n_alive", "l0"]:
             # Draw a labeled, dashed hline at y = d_model
             fig.add_shape(
                 type="line",
                 x0=-0.5,
-                x1=len(y_data) - 0.5,
+                x1=len(layers) - 0.5,
                 y0=model.cfg.d_model,
                 y1=model.cfg.d_model,
                 line=dict(color="black", dash="dash"),
