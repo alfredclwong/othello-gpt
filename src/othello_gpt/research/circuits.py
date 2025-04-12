@@ -121,7 +121,7 @@ plot_evals(eval_dict, metrics, y_ranges, saes)
 # %%
 sae_alive_idxs = [
     (d["acts_post"] >= sae.cfg.dead_threshold).flatten(0, 1).any(0).nonzero().squeeze()
-    for sae, d in zip(saes, test_forward_dicts)
+    for d, sae in zip(test_forward_dicts, saes)
 ]
 
 w_ep = model.W_E_pos / model.W_E_pos.norm(dim=-1, keepdim=True)
@@ -221,7 +221,7 @@ board_state_targets = {
     "e": empty_target,
     # "tm": tm_target,
     "tm": lambda x, d: theirs_empty_mine_target(x, d) / 2,
-    "ptm": lambda x, d: prev_tem_target(x, d) / 2,
+    # "ptm": lambda x, d: prev_tem_target(x, d) / 2,
     # "c": c_if_ne_target,
     "c": captures_target,
     "fp": flip_parity_target,
@@ -231,6 +231,7 @@ board_state_targets = {
 
 board_state_data_keys = ["acts_count", "acts_sum", "states_sum", "states_wsum"]
 n_acts = [latent_idxs[1]] + [len(idxs) for idxs in sae_alive_idxs] + [model.cfg.d_vocab]
+frac_active = [t.zeros(n, device=device) for n in n_acts]
 board_state_data_values = [
     [t.zeros((len(board_state_targets), n, size, size), device=device) for n in n_acts]
     for _ in board_state_data_keys
@@ -249,6 +250,7 @@ for i, batch in enumerate(tqdm(large_batched_test_dataset)):
                     keys=[acts_type],
                 )[acts_type].float()
                 acts = acts[:, sae_alive_idxs[sae_idx]]
+            frac_active[j] += (acts > sae.cfg.dead_threshold).float().sum(0)
         else:
             input_ids = t.tensor(batch["input_ids"], device=device)[:, :-1]
             acts = t.zeros((*input_ids.shape, n_acts[j]), device=device)
@@ -262,13 +264,12 @@ for i, batch in enumerate(tqdm(large_batched_test_dataset)):
                 with t.inference_mode():
                     logits = model(input_ids, return_type="logits")
                 probs = logits.softmax(-1)
-                # max_probs = probs.max(dim=-1, keepdim=True)[0]
-                # acts = (probs > (max_probs / 2)).float()
-
+                max_probs = probs.max(dim=-1, keepdim=True)[0]
+                acts = (probs > (max_probs / 2)).float()
                 # acts = t.nn.functional.relu(logits)
-
-                acts = probs
+                # acts = probs
             acts = acts.flatten(0, 1).float()
+            frac_active[j] += (acts > 1e-3).float().sum(0)
 
         for k, target_fn in enumerate(board_state_targets.values()):
             board_state = target_fn(batch, device).float()
@@ -303,6 +304,10 @@ avg_board_states = [
     s / a
     for s, a in zip(board_state_data["states_sum"], board_state_data["acts_count"])
 ]
+frac_active = [x / n_test_large / model.cfg.n_ctx for x in frac_active]
+
+# %%
+[x.sum().item() for x in frac_active]
 
 # %%
 type Node = tuple[int, int]
@@ -358,11 +363,14 @@ def latent_idx_to_node(idx: int, latent_idxs: list[int]) -> Node:
     return (layer, offset)
 
 
-def display_auto_interp_data(nodes: list[Node], G=None):
+def display_auto_interp_data(nodes: list[Node], G=None, targets=[]):
+    if not targets:
+        targets = list(board_state_targets.keys())
+
     fig = make_subplots(
         rows=len(nodes),
-        cols=len(board_state_targets),
-        subplot_titles=list(board_state_targets.keys()) * len(nodes),
+        cols=len(targets),
+        subplot_titles=targets * len(nodes),
     )
 
     x_labels = [chr(97 + i) for i in range(size)]
@@ -374,7 +382,8 @@ def display_auto_interp_data(nodes: list[Node], G=None):
         if get_node_type(n, saes) == NodeType.ATTN_Z:
             latent_idx //= saes[sae_idx].model.cfg.n_heads
 
-        for target_idx, target_label in enumerate(board_state_targets.keys()):
+        for col_idx, target_label in enumerate(targets, start=1):
+            target_idx = list(board_state_targets.keys()).index(target_label)
             weighted_avg_data = (
                 weighted_avg_board_states[n[0]][target_idx, latent_idx].cpu().numpy()
             )
@@ -390,7 +399,7 @@ def display_auto_interp_data(nodes: list[Node], G=None):
                     zmax=1 * scale,
                 ),
                 row=row_idx,
-                col=target_idx + 1,
+                col=col_idx,
             )
 
             fig.update_xaxes(
@@ -398,7 +407,7 @@ def display_auto_interp_data(nodes: list[Node], G=None):
                 ticktext=x_labels,
                 tickfont=dict(size=8),
                 row=row_idx,
-                col=target_idx + 1,
+                col=col_idx,
                 showline=True,
                 linecolor="black",
                 linewidth=1,
@@ -412,7 +421,7 @@ def display_auto_interp_data(nodes: list[Node], G=None):
                 ticktext=y_labels,
                 tickfont=dict(size=8),
                 row=row_idx,
-                col=target_idx + 1,
+                col=col_idx,
                 showline=True,
                 linecolor="black",
                 linewidth=1,
@@ -422,15 +431,16 @@ def display_auto_interp_data(nodes: list[Node], G=None):
             )
 
         # Add row label using node_to_label
-        row_label = node_to_label(n, latent_idxs, latent_labels)
+        row_label = f"x = {node_to_label(n, latent_idxs, latent_labels)}"
+        row_label += f", p(x>0) = {frac_active[n[0]][latent_idx]:.1%}"
         parents = [(p, G[p][n]["weight"]) for p in G.predecessors(n)] if G else []
         parents_str = ", ".join(
-            f"{node_to_label(p, latent_idxs, latent_labels)} ({w:.2f})"
+            f"x.{node_to_label(p, latent_idxs, latent_labels)} = {w:.2f}"
             for p, w in parents
         )
         if parents_str:
-            row_label += f" [{parents_str}]"
-        ref = (row_idx - 1) * len(board_state_targets) + 1
+            row_label += f", {parents_str}"
+        ref = (row_idx - 1) * len(targets) + 1
         ref = "" if ref == 1 else ref
         fig.add_annotation(
             x=0,
@@ -445,8 +455,8 @@ def display_auto_interp_data(nodes: list[Node], G=None):
         )
 
     fig.update_layout(
-        height=max(240, 120 * len(nodes)),
-        width=100 * len(board_state_targets),
+        height=120 * len(nodes),
+        width=100 * len(targets),
         title="Board states weighted by feature post_acts",
         margin=dict(l=10, r=10, t=80, b=10),
         showlegend=False,
@@ -492,6 +502,10 @@ def display_probe_alignments(
             probe_layer = -1
         else:
             probe_layer = saes[n[0] - 1].cfg.out_hook_layer
+
+        latent_idx = n[1]
+        if node_type is NodeType.ATTN_Z:
+            latent_idx //= saes[sae_idx].model.cfg.n_heads
 
         for probe_idx, probe_key in enumerate(probe_keys):
             probe = probes[probe_key][..., probe_layer]
@@ -543,6 +557,7 @@ def display_probe_alignments(
             )
 
         row_label = node_to_label(n, latent_idxs, latent_labels)
+        row_label += f" {frac_active[n[0]][latent_idx]:.1%}"
         parents = [(p, G[p][n]["weight"]) for p in G.predecessors(n)] if G else []
         parents_str = ", ".join(
             f"{node_to_label(p, latent_idxs, latent_labels)} ({w:.2f})"
@@ -569,38 +584,13 @@ def display_probe_alignments(
     fig.update_layout(
         height=120 * len(nl),
         width=100 * len(probe_keys),
-        title="Probe x feature colinearities",
+        title="Probe x feature collinearities",
         margin=dict(l=10, r=10, t=80, b=10),
         showlegend=False,
         xaxis=dict(tickangle=0),
     )
 
     fig.show()
-
-
-def get_upstream_nodes_qk(in_latent, upstream_latents, sae: SAE, head_idx, threshold):
-    n_upstream = upstream_latents.shape[0]
-
-    w_q = sae.model.W_Q[sae.cfg.in_hook_layer, head_idx]
-    w_k = sae.model.W_K[sae.cfg.in_hook_layer, head_idx]
-    ws = [w_q, w_k]
-    qk_latents = t.cat([upstream_latents @ w for w in ws], dim=0)
-    qk_latents = qk_latents / qk_latents.norm(dim=-1, keepdim=True)
-
-    qk_alignments = qk_latents @ in_latent
-    _, topk_qk_idxs = t.topk(qk_alignments, k)  # only pos alignments for attn
-
-    nodes = [[], []]
-    alignments = [[], []]
-    for qk_idx in topk_qk_idxs.tolist():
-        v = qk_alignments[qk_idx]
-        if v.abs() < threshold:
-            break
-        qk, latent_idx = divmod(qk_idx, n_upstream)
-        c = latent_idx_to_node(latent_idx, latent_idxs)
-        nodes[qk].append(c)
-        alignments[qk].append(v)
-    return nodes, alignments
 
 
 def get_w_v(n, saes):
@@ -612,7 +602,7 @@ def get_w_v(n, saes):
 
 
 def get_upstream_nodes(
-    n: Node, saes: list[SAE], k: int = 2, threshold: float = 0.5
+    n: Node, saes: list[SAE], k: int = 2, threshold: float = 0.5, exclude_p: bool = True
 ) -> tuple[
     list[Node],
     list[float],
@@ -631,47 +621,51 @@ def get_upstream_nodes(
     #   For target attn_z, only the previous ln1 upstream is valid
     #   For target transcoder, only the previous ln2 upstream is valid
     #   For target ln, any non-ln upstream is valid
+    #   When no LN_FINAL, let UNEMBED look back at all upstream
     ln_types = [NodeType.LN1, NodeType.LN2, NodeType.LN_FINAL]
-    if node_type in ln_types:
-        n0s = [
-            n0
-            for n0 in range(n[0])
-            if get_node_type((n0, 0), saes) not in ln_types
-        ]
-    else:
+    if get_node_type((n[0] - 1, 0), saes) in ln_types:
         n0s = [n[0] - 1]
-    upstream_idxs = np.cumsum([0] + [latent_idxs[n0 + 1] - latent_idxs[n0] for n0 in n0s])
-    upstream_latents = t.cat([out_latents[n0] for n0 in n0s], dim=0)
-    # upstream_latents = t.cat(out_latents[: n[0]], dim=0)
+    else:
+        n0s = [n0 for n0 in range(n[0]) if get_node_type((n0, 0), saes) not in ln_types]
+
+    upstream_idxs = np.cumsum(
+        [0] + [latent_idxs[n0 + 1] - latent_idxs[n0] for n0 in n0s]
+    )
+    upstream_latents = [out_latents[n0] for n0 in n0s]
+    upstream_latents = t.cat(upstream_latents, dim=0)
 
     # Apply v transform if necessary
     if node_type is NodeType.ATTN_Z:
         # Project upstream latents into V space
-        sae = saes[n[0] - 1]
-        n_head = sae.model.cfg.n_heads
-        head_idx = n[1] % n_head
-
-        qk_nodes, qk_alignments = get_upstream_nodes_qk(
-            in_latent, upstream_latents, sae, head_idx, threshold
-        )
-
         upstream_latents = upstream_latents @ get_w_v(n, saes)
 
     upstream_latents = upstream_latents / upstream_latents.norm(
         dim=-1, keepdim=True
     )  # shape: n_upstream d_latent
+    if exclude_p and n0s[0] == 0:
+        upstream_latents[saes[0].model.cfg.d_vocab : latent_idxs[1]] = 0
 
     # Find topk abs alignments
     upstream_alignments = upstream_latents @ in_latent
+    if n[0] == 1:
+        k = latent_idxs[1]
     if node_type is NodeType.ATTN_Z:
-        _, topk_upstream_idxs = t.topk(
-            upstream_alignments, k
-        )  # only pos alignments for attn
+        # if False:
+        _, topk_upstream_idxs = t.topk(upstream_alignments, k)
+        # _, topk_upstream_idxs = t.topk(upstream_alignments.abs(), k)
     else:
-        # split topk between pos and neg alignments
-        _, topk_upstream_idxs_pos = t.topk(upstream_alignments, (k + 1) // 2)
-        _, topk_upstream_idxs_neg = t.topk(upstream_alignments, k // 2, largest=False)
-        topk_upstream_idxs = t.cat([topk_upstream_idxs_pos, topk_upstream_idxs_neg])
+        if k > 1:
+            # split topk between pos and neg alignments
+            _, topk_upstream_idxs_pos = t.topk(upstream_alignments, (k + 1) // 2)
+            _, topk_upstream_idxs_neg = t.topk(
+                upstream_alignments, k // 2, largest=False
+            )
+            upstream_idx_vals = t.cat([topk_upstream_idxs_pos, topk_upstream_idxs_neg])
+            upstream_align_vals = upstream_alignments[upstream_idx_vals]
+            sorted_by_abs_idx = t.argsort(upstream_align_vals.abs(), descending=True)
+            topk_upstream_idxs = upstream_idx_vals[sorted_by_abs_idx]
+        else:
+            _, topk_upstream_idxs = t.topk(upstream_alignments.abs(), k)
 
     nodes = []
     alignments = []
@@ -688,9 +682,7 @@ def get_upstream_nodes(
         nodes.append(c)
         alignments.append(v.item())
 
-    if node_type is NodeType.ATTN_Z:
-        return nodes, alignments, qk_nodes, qk_alignments
-    return nodes, alignments, [], []
+    return nodes, alignments
 
 
 def get_coactivation_matrix(nodes: list[Node]):
@@ -804,7 +796,17 @@ def trace_circuit(
     return G
 
 
-def draw_graph(G, latent_idxs, latent_labels, figsize=(16, 48), linear_spacing=True):
+def draw_graph(
+    G,
+    latent_idxs,
+    latent_labels,
+    figsize=(16, 48),
+    linear_spacing=True,
+    sort_ns=True,
+    flipped=False,
+    sort_b=True,
+    rotated=False,
+):
     # Generate the layout
     pos = {}
 
@@ -818,12 +820,22 @@ def draw_graph(G, latent_idxs, latent_labels, figsize=(16, 48), linear_spacing=T
 
     for layer, ns in nodes_per_layer.items():
         layer_size = layer_sizes[layer]
+        if sort_ns or (layer == 0 and sort_b):
+            ns = sorted(ns, reverse=True)
         for n in ns:
             if linear_spacing:
-                pos[n] = (layer, 1 - n[1] / layer_size)
+                y = 1 - n[1] / layer_size
             else:
-                pos[n] = (layer, 1 - (ns.index(n) + 1) / (len(ns) + 1))
+                y = (ns.index(n) + 1 + (layer % 2) / 2) / (len(ns) + 1)
+            if flipped:
+                y = 1 - y
+            if rotated:
+                pos[n] = (y, layer)
+            else:
+                pos[n] = (layer, y)
 
+    if rotated:
+        figsize = (figsize[1], figsize[0])
     fig, ax = plt.subplots(figsize=figsize)
     nx.draw(
         G,
@@ -849,7 +861,7 @@ def draw_graph(G, latent_idxs, latent_labels, figsize=(16, 48), linear_spacing=T
         rotate=False,
         font_size=6,  # Make edge labels smaller
         bbox=dict(
-            boxstyle="round,pad=0.3", edgecolor="none", facecolor="none"
+            boxstyle="round,pad=0.1", edgecolor="none", facecolor="none"
         ),  # Transparent background
     )
     plt.show()
@@ -892,7 +904,9 @@ def get_act_df(nodes: list[Node], game_idx, filter_inactive: bool = True):
                 n_head = sae.model.cfg.n_heads
                 latent_idx //= n_head
             acts.append(
-                test_forward_dicts[sae_idx]["acts_pre"][game_idx, :, sae_alive_idxs[sae_idx][latent_idx]]
+                test_forward_dicts[sae_idx]["acts_pre"][
+                    game_idx, :, sae_alive_idxs[sae_idx][latent_idx]
+                ]
             )
     acts = t.stack(acts, dim=-1)
 
@@ -914,7 +928,9 @@ def get_game_acts(
             latent_idxs_by_sae_idx[n[0] - 1].add(n[1])
     acts = t.cat(
         [
-            test_forward_dicts[sae_idx][act_type].sum(1)[:, list(_latent_idxs)]
+            test_forward_dicts[sae_idx][act_type].sum(1)[:, sae_alive_idxs[sae_idx]][
+                :, list(_latent_idxs)
+            ]
             for sae_idx, _latent_idxs in latent_idxs_by_sae_idx.items()
         ],
         dim=-1,
@@ -937,6 +953,7 @@ def display_coactivations(nodes: list[Node]):
     )
     fig.update_xaxes(
         tickvals=list(range(n_nodes)),
+        tickfont=dict(size=6),
         ticktext=labels,
         showline=True,
         linecolor="black",
@@ -948,6 +965,7 @@ def display_coactivations(nodes: list[Node]):
     )
     fig.update_yaxes(
         tickvals=list(range(n_nodes)),
+        tickfont=dict(size=6),
         ticktext=labels,
         showline=True,
         linecolor="black",
@@ -957,22 +975,27 @@ def display_coactivations(nodes: list[Node]):
         autorange="reversed",
     )
 
-    fig_size = max(400, n_nodes * 30)
+    fig_size = max(250, n_nodes * 30)
+    fig.update_traces(
+        text=[[int(x * 100) for x in row] for row in coacts.cpu()],
+        texttemplate="%{text}",
+        textfont={"size": 8, "color": "white"},
+    )
     fig.update_layout(
         height=fig_size,
         width=fig_size,
         margin=dict(l=10, r=10, t=50, b=10),
-        title="Co-activation Heatmap: C[i, j] = p(j|i)",
+        title="C[i, j] = p(j|i)",
         xaxis=dict(title="Node j"),
         yaxis=dict(title="Node i"),
     )
     fig.show()
 
 
-def display_colinearities(nodes: list[Node], last_is_root: bool = True):
+def display_collinearities(nodes: list[Node], last_is_root: bool = True):
     node_latents = [out_latents[n[0]][n[1]] for n in nodes]
     if last_is_root and get_node_type(nodes[-1], saes) is NodeType.ATTN_Z:
-        w_v = get_w_v(nodes[-1])
+        w_v = get_w_v(nodes[-1], saes)
         node_latents = [x @ w_v for x in node_latents]
     labels = [node_to_label(n, latent_idxs, latent_labels) for n in nodes]
     last_is_root = (
@@ -983,7 +1006,7 @@ def display_colinearities(nodes: list[Node], last_is_root: bool = True):
         labels.insert(-1, labels[-1] + " (in)")
         labels[-1] += " (out)"
     node_latents = t.stack(node_latents, dim=0)
-    colins = t.tril(node_latents @ node_latents.T).cpu()
+    collins = t.tril(node_latents @ node_latents.T).cpu()
     text = [
         [
             ""
@@ -991,11 +1014,11 @@ def display_colinearities(nodes: list[Node], last_is_root: bool = True):
             else f"{int(x.round(decimals=2) * 100)}"
             for x in row
         ]
-        for i, row in enumerate(colins)
+        for i, row in enumerate(collins)
     ]
     fig = go.Figure(
         data=go.Heatmap(
-            z=colins,
+            z=collins,
             colorscale="RdBu",
             showscale=False,
             zmin=-1,
@@ -1008,7 +1031,7 @@ def display_colinearities(nodes: list[Node], last_is_root: bool = True):
     fig.update_xaxes(
         tickvals=list(range(len(labels))),
         ticktext=labels,
-        # tickfont=dict(size=4),
+        tickfont=dict(size=6),
         showline=True,
         linecolor="black",
         linewidth=1,
@@ -1020,7 +1043,7 @@ def display_colinearities(nodes: list[Node], last_is_root: bool = True):
     fig.update_yaxes(
         tickvals=list(range(len(labels))),
         ticktext=labels,
-        # tickfont=dict(size=4),
+        tickfont=dict(size=6),
         showline=True,
         linecolor="black",
         linewidth=1,
@@ -1028,12 +1051,12 @@ def display_colinearities(nodes: list[Node], last_is_root: bool = True):
         constrain="domain",
         autorange="reversed",
     )
-    fig_size = max(400, len(labels) * 30)
+    fig_size = max(250, len(labels) * 30)
     fig.update_layout(
         height=fig_size,
         width=fig_size,
         margin=dict(l=10, r=10, t=50, b=10),
-        title="Colinearity Heatmap",
+        title="Collinearity Heatmap",
         xaxis=dict(title="Node j"),
         yaxis=dict(title="Node i"),
     )
@@ -1041,7 +1064,7 @@ def display_colinearities(nodes: list[Node], last_is_root: bool = True):
 
 
 def display_node_interp(
-    n: Node, saes, latent_idxs, latent_labels, k=8, threshold=0.5, levels=2
+    n: Node, saes, latent_idxs, latent_labels, k=8, threshold=0.5, targets=[]
 ):
     # 1a. Show df of aligned upstream latents: alignment, necessary/sufficient co-activating stats, frac active
     # 1b. Same for downstream latents
@@ -1052,9 +1075,7 @@ def display_node_interp(
     print(f"Node {node_to_label(n, latent_idxs, latent_labels)} {n} interp dash")
 
     # 1a.
-    upstream_nodes, upstream_alignments, qk_nodes, qk_alignments = get_upstream_nodes(
-        n, saes, k=k, threshold=threshold
-    )
+    upstream_nodes, upstream_alignments = get_upstream_nodes(n, saes, k, threshold)
     all_nodes = upstream_nodes + [n]
 
     # Create a directed graph with n as the root and upstream_nodes as the children
@@ -1066,10 +1087,17 @@ def display_node_interp(
         H.add_edge(n, child, weight=w, abs_weight=abs(w))
     for node in H.nodes:
         H.nodes[node]["subset_key"] = node[0]
-    draw_graph(H, latent_idxs, latent_labels, figsize=(6, 8), linear_spacing=False)
+    draw_graph(
+        H,
+        latent_idxs,
+        latent_labels,
+        figsize=(4, 4),
+        linear_spacing=False,
+        sort_ns=False,
+    )
 
     display_coactivations(all_nodes)
-    display_colinearities(all_nodes)
+    display_collinearities(all_nodes)
 
     if qk_nodes:
         print("QK cosine similarities")
@@ -1079,15 +1107,17 @@ def display_node_interp(
             for n, v in zip(ns, vs)
         ]
         print("\n".join(qk_strs))
-        # display_colinearities(qk_nodes + [n])
-        # TODO support colinearities of qk vectors and n_in
+        # display_collinearities(qk_nodes + [n])
+        # TODO support collinearities of qk vectors and n_in
         # Coactivations would be intractable as they are across positions...?
 
     # 2.
-    display_auto_interp_data(all_nodes, H)
-    display_probe_alignments(all_nodes, H)
+    display_auto_interp_data(all_nodes, H, targets=targets)
+    if get_node_type(n, saes) is not NodeType.ATTN_Z:  # TODO
+        display_probe_alignments(all_nodes, H)
 
     # 3.
+    # TODO check this
     game_acts = get_game_acts(H.nodes, act_type="acts_pre")
     root_idx = list(H.nodes).index(n)
     max_game_idx = game_acts[..., root_idx].argmax().item()
@@ -1102,38 +1132,75 @@ def display_node_interp(
     display(min_df)
     plot_game(test_dataset[min_game_idx], subplot_size=100, title="Min activating game")
 
+
 # %%
-k = 8  # expand by k times at each node
+root, k, threshold = (13, 0), 4, 0.8  # A1
+# root, k, threshold = (12, 1045), 8, 0.0
+# root, k, threshold = (12, 683), 4, 0.5
+# root, k, threshold = (11, 54), 4, 0.3
+root, k, threshold = (11, 256), 4, 0.3
+root, k, threshold = (8, 145), 4, 0.3
+# root, k, threshold = (7, 362), 4, 0.3
+# root, k, threshold = (4, 287), 4, 0.5
+# root, k, threshold = (3, 246), 8, 0.5
+# root, k, threshold = (2, 509 * 8), 8, 0.3
+# root, k, threshold = (1, 32), 4, 0.2
+# root, k, threshold = (1, 113), 4, 0.1
+# root, k, threshold = (2, 416 * 8), 8, 0.3
+
+# root = latent_idx_to_node(latent_labels.index("m2f830"), latent_idxs)
+display_node_interp(
+    root,
+    saes,
+    latent_idxs,
+    latent_labels,
+    k=k,
+    threshold=threshold,
+    targets=["l", "e", "tm", "p"],
+)
+
+# %%
+k = 2  # expand by k times at each node
 root = (len(latent_idxs) - 2, 0)  # A1
+# root = (len(latent_idxs) - 3, 683)
 # root = (len(latent_idxs) - 3, 20)
 # root = (len(latent_idxs) - 2, 19)  # F4
 # root = (len(latent_idxs) - 2, 7)  # B2
 thresholds = {
-    NodeType.UNEMBED: 0.3,
-    NodeType.LN_FINAL: 0.2,
-    NodeType.LN2: 0.5,
-    NodeType.LN1: 0.5,
-    NodeType.TRANSCODER: 0.5,
-    NodeType.ATTN_Z: 0.2,
+    NodeType.UNEMBED: 0.8,
+    NodeType.LN_FINAL: 0.1,
+    NodeType.TRANSCODER: 0.3,
+    NodeType.LN2: 0.3,
+    NodeType.ATTN_Z: 0.3,
+    NodeType.LN1: 0.1,
 }
 G = trace_circuit(
-    root, k, thresholds, saes, pos_only=True, dfs=False, node_limit=500, max_depth=None
+    root, 2, thresholds, saes, pos_only=False, dfs=True, node_limit=1000, max_depth=None
 )
-draw_graph(G, latent_idxs, latent_labels)
-# display_auto_interp_data(G.nodes, G)
+draw_graph(
+    G,
+    latent_idxs,
+    latent_labels,
+    linear_spacing=False,
+    figsize=(12, 16),
+    sort_ns=False,
+    flipped=False,
+)
 
-
-# %%
-root = (len(saes) + 1, 0)  # A1
-# root = (len(saes) + 1, 7)  # B2
-# root = (len(saes) + 1, 19)  # F4
-# root = (len(saes), 225)
-# root = (1, 443 * 8 + 6)
-# root = latent_idx_to_node(latent_labels.index("m2f830"), latent_idxs)
-display_node_interp(root, saes, latent_idxs, latent_labels, k=8, threshold=0.1)
-
-# %%
-in_latents[root[0]][root[1]]
+H = trace_circuit(
+    root, 1, thresholds, saes, pos_only=False, dfs=True, node_limit=1000, max_depth=None
+)
+draw_graph(
+    H,
+    latent_idxs,
+    latent_labels,
+    linear_spacing=False,
+    figsize=(15, 4),
+    sort_ns=False,
+    flipped=False,
+    rotated=True,
+)
+display_auto_interp_data(H.nodes, H, targets=["l", "e", "tm", "p"])
 
 # %%
 # n0s = np.random.randint(len(latent_idxs) - 1, size=10)
@@ -1154,3 +1221,47 @@ _, cache = model.run_with_cache(input_ids)
 [sae.b_dec.abs().mean() for sae in saes]
 
 # %%
+collins = probes["u"][:, all_squares, 0].T @ probes["u"][:, all_squares, 0]
+fig = go.Figure(
+    data=go.Heatmap(
+        z=collins.cpu(), colorscale="RdBu", showscale=False, zmin=-1, zmax=1
+    )
+)
+
+# Add axis labels
+squares = [move_id_to_text(i, size) for i in all_squares]
+fig.update_xaxes(
+    ticktext=squares,
+    tickvals=list(range(len(squares))),
+    showline=True,
+    linecolor="black",
+    linewidth=1,
+    mirror=True,
+    scaleanchor="y",
+    scaleratio=1,
+    constrain="domain",
+)
+fig.update_yaxes(
+    ticktext=squares,
+    tickvals=list(range(len(squares))),
+    showline=True,
+    linecolor="black",
+    linewidth=1,
+    mirror=True,
+    constrain="domain",
+    autorange="reversed",
+)
+
+fig.update_layout(
+    height=400,
+    width=400,
+    title="W_U collinearity matrix",
+    margin=dict(l=10, r=10, t=50, b=10),
+    xaxis=dict(tickfont=dict(size=8)),
+    yaxis=dict(tickfont=dict(size=8)),
+)
+
+fig.show()
+
+# %%
+(collins - t.eye(collins.shape[0], device=collins.device)).abs().mean()

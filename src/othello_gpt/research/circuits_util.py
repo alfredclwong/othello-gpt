@@ -20,12 +20,12 @@ def load_saes(model: HookedTransformer, model_name: str, device: str) -> list[SA
         mlp_hook_suffixes,
     ]
     sae_params = list(product(range(model.cfg.n_layers), hook_suffixes))
-    sae_params.append((2, ("hook_resid_post", "ln_final.hook_normalized")))
+    # sae_params.append((2, ("hook_resid_post", "ln_final.hook_normalized")))
     d_saes = [
         1024, 1024, 1024, 1024,
         1024, 1024, 1024, 1024,
         1024, 1024, 1024, 2048,
-        1024,
+        # 1024,
     ]
     cfgs = [
         SAEConfig(
@@ -35,6 +35,7 @@ def load_saes(model: HookedTransformer, model_name: str, device: str) -> list[SA
             out_hook_layer=hook_layer,
             in_hook_suffix=in_hook_suffix,
             out_hook_suffix=out_hook_suffix,
+            dead_threshold=1e-3,
         )
         for i, (hook_layer, (in_hook_suffix, out_hook_suffix)) in enumerate(sae_params)
     ]

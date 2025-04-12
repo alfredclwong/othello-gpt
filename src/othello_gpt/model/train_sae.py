@@ -42,10 +42,10 @@ sae_cfg = SAEConfig(
     in_hook_suffix=in_hook_suffix,
     out_hook_layer=model.cfg.n_layers - 1,
     out_hook_suffix=out_hook_suffix,
-    lr=1e-4,
+    lr=2e-4,
     sparsity_coeff=0.001,
-    n_epochs=4,
-    resample_freq=9000,
+    n_epochs=3,
+    resample_freq=11000,
     resample_window=2000,
     use_b_dec=True,
 )

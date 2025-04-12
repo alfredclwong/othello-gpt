@@ -310,7 +310,7 @@ class SAE(t.nn.Module, hf.PyTorchModelHubMixin):
             self.W_dec.data = self.W_dec_normalized.data
 
             # Calculate the mean sparsities over batch dim for each feature
-            active = forward_dict["acts_post"] > 1e-8
+            active = forward_dict["acts_post"] > self.cfg.dead_threshold
             frac_active = active.float().mean(0)
             frac_active_in_window.append(frac_active)
 
